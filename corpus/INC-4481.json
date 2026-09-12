@@ -1,0 +1,210 @@
+{
+  "bundle_version": "1.0",
+  "incident_id": "INC-4481",
+  "slice": "resource_exhaustion",
+  "title": "orders-db latency spike after a deploy — intervention runs, but the fix doesn't hold",
+
+  "ground_truth": {
+    "root_cause_id": "H1",
+    "summary": "orders-db is genuinely degrading — a background compaction has been running for hours and buffer-pool hit rate has been sinking. The v4.2.0 deploy is coincidental. Passive checks can't tell (elevated latency looks compatible with either story). The traffic-shift intervention correctly rules out the deploy — cohorts_uniform proves both versions are equally slow — but rolling back the deploy would NOT fix the incident because the deploy is not the cause. The 5xx rate stays elevated after the canary shift. The safety-envelope's auto_revert fires and the verdict is honestly recorded as unresolved-by-intervention. Distinct from INC-4478 (deploy IS guilty) — this is the mirror case.",
+    "rollback_correct": false
+  },
+
+  "human_baseline_seconds": 2800,
+
+  "alert": {
+    "service": "orders-service",
+    "environment": "production",
+    "severity": "SEV-2",
+    "fired_at": "2026-09-06T11:42:10Z",
+    "signal": "request_latency_p95",
+    "condition": "p95 1,920ms > threshold 800ms",
+    "source": "pagerduty"
+  },
+
+  "topology": {
+    "nodes": ["orders-service", "orders-db"],
+    "edges": [{ "from": "orders-service", "to": "orders-db" }]
+  },
+
+  "observables": [
+    { "name": "db_pressure_signal",   "unit": "map", "desc": "orders-db pressure snapshot — read IOPS, buffer hit rate, active connections" },
+    { "name": "app_error_signal",     "unit": "map", "desc": "orders-service app-side exception breakdown by class" },
+    { "name": "traffic_cohort_split", "unit": "map", "desc": "p95 latency of the two version cohorts AFTER a controlled traffic-shift intervention" }
+  ],
+
+  "customer_impact": {
+    "tier": "P1",
+    "affected_users": 4200,
+    "sla_breach": true,
+    "revenue_tagged_service": true,
+    "impact_source": "orders-service POST /orders — customer-facing order placement",
+    "_note_for_authors": "P1 — the incident is real customer pain (SLA breach, revenue path), but a lower blast radius than INC-4479's P0. High CIS should still route it correctly for urgency; the auto-revert failure path is the demoable moment."
+  },
+
+  "seed_hypotheses": [
+    {
+      "id": "H1",
+      "claim": "orders-db is degrading under sustained load — a long-running background compaction has been slowing reads for hours. The app-side deploy is coincidental. The fix is DB-side (throttle compaction, wait it out).",
+      "natural_owner": "telemetry_agent",
+      "predicted_observations": [
+        { "observable": "db_pressure_signal",   "prediction": "shows_pressure",    "note": "if the DB is the cause, IOPS/buffer/connections all read elevated" },
+        { "observable": "app_error_signal",     "prediction": "mixed_upstream_wait","note": "if the DB is at fault, app errors are dominated by upstream-wait timeouts, not application exceptions" },
+        { "observable": "traffic_cohort_split", "prediction": "cohorts_uniform",   "note": "if the DB is the cause, BOTH version cohorts see the same slow p95 after a traffic shift" }
+      ]
+    },
+    {
+      "id": "H2",
+      "claim": "Deploy v4.2.0 introduced a subtle hot query; roll it back.",
+      "natural_owner": "change_agent",
+      "predicted_observations": [
+        { "observable": "db_pressure_signal",   "prediction": "shows_pressure",    "note": "a hot query drives DB pressure too — passive signal is ambiguous" },
+        { "observable": "app_error_signal",     "prediction": "mixed_upstream_wait","note": "same upstream-wait signature as the DB story — ambiguous" },
+        { "observable": "traffic_cohort_split", "prediction": "cohorts_diverge",   "note": "if the deploy is guilty, the new-version cohort stays slow while the old-version cohort recovers after the shift" }
+      ]
+    }
+  ],
+
+  "evidence": {
+    "prior": [
+      {
+        "source_type": "deployment",
+        "source_uri": "github://orders-service/deploys/v4.2.0",
+        "retrieved_at": "2026-09-06T11:42:15Z",
+        "measures": [],
+        "probe_id": null,
+        "payload": {
+          "version": "v4.2.0",
+          "deployed_at": "2026-09-06T11:34:00Z",
+          "deployed_by": "s.mohamed",
+          "commit_sha": "91fe2ac"
+        }
+      },
+      {
+        "source_type": "diff",
+        "source_uri": "github://orders-service/commit/91fe2ac",
+        "retrieved_at": "2026-09-06T11:42:16Z",
+        "measures": [],
+        "probe_id": null,
+        "_note_for_authors": "Small, harmless-looking change. The diff will bias the deploy story (H2) exactly like a red herring — the reasoner should NOT stop at the diff alone.",
+        "payload": {
+          "commit_sha": "91fe2ac",
+          "files": [
+            { "path": "src/handlers/orders.py", "hunk": "-        rows = db.execute(select)\n+        rows = db.execute(select).fetchall()" }
+          ]
+        }
+      },
+      {
+        "source_type": "metric",
+        "source_uri": "prometheus://orders-service/request_latency_p95",
+        "retrieved_at": "2026-09-06T11:42:18Z",
+        "measures": [],
+        "probe_id": null,
+        "payload": {
+          "unit": "ms",
+          "series": [
+            ["2026-09-06T11:34:00Z", 420],
+            ["2026-09-06T11:38:00Z", 1250],
+            ["2026-09-06T11:42:00Z", 1920]
+          ]
+        }
+      },
+      {
+        "source_type": "metric",
+        "source_uri": "prometheus://orders-db/iops",
+        "retrieved_at": "2026-09-06T11:42:19Z",
+        "measures": [],
+        "probe_id": null,
+        "_note_for_authors": "DB is showing elevated iops in prior — but this is ambiguous. Could be caused by the DB itself OR by the deploy driving more work. Passive checks can't discriminate — this is why the intervention is needed.",
+        "payload": {
+          "unit": "ops/s",
+          "series": [
+            ["2026-09-06T11:34:00Z", 8100],
+            ["2026-09-06T11:38:00Z", 11400],
+            ["2026-09-06T11:42:00Z", 14200]
+          ]
+        }
+      },
+      {
+        "source_type": "prior_incident",
+        "source_uri": "vectordb://incidents/INC-3204",
+        "retrieved_at": "2026-09-06T11:42:21Z",
+        "measures": [],
+        "probe_id": null,
+        "payload": {
+          "incident_id": "INC-3204",
+          "signature": "DB compaction backpressure elevated app latency; deploy was innocent",
+          "resolution": "Waited for compaction to complete; deploy rollback was NOT needed."
+        }
+      }
+    ],
+
+    "probeable": [
+      {
+        "source_type": "probe_result",
+        "source_uri": "prometheus://orders-db/deep_pressure",
+        "retrieved_at": null,
+        "measures": ["db_pressure_signal"],
+        "probe_id": "P_db_deep",
+        "_note_for_authors": "Distractor: pressure is elevated but BOTH hypotheses predict shows_pressure, so this probe's info-gain is 0.",
+        "payload": {
+          "map": { "iops_pct": 82, "buffer_hit_rate": 0.71, "active_connections": 47 }
+        }
+      },
+      {
+        "source_type": "probe_result",
+        "source_uri": "logs://orders-service/error_class_breakdown",
+        "retrieved_at": null,
+        "measures": ["app_error_signal"],
+        "probe_id": "P_app_errors",
+        "_note_for_authors": "Distractor: mixed_upstream_wait matches BOTH hypotheses, info-gain 0.",
+        "payload": {
+          "map": { "UpstreamTimeout": 620, "NullPointer": 3, "AuthError": 1 }
+        }
+      }
+    ],
+
+    "intervention_results": [
+      {
+        "source_type": "intervention_result",
+        "source_uri": "traffic-shifter://orders-service/I_traffic_shift",
+        "retrieved_at": null,
+        "measures": ["traffic_cohort_split"],
+        "probe_id": "I_traffic_shift",
+        "_note_for_authors": "THE CAUSAL TEST. Route 5% of traffic back to v4.1.0 for 60 seconds, then compare cohort p95. Both cohorts return uniform (~1800ms) — the deploy is NOT the cause. H2 is eliminated, but rolling back would NOT fix the incident. The DB is genuinely at fault (H1).",
+        "payload": {
+          "map": { "cohort_v_new_p95_ms": 1810.0, "cohort_v_old_p95_ms": 1790.0 }
+        }
+      }
+    ],
+
+    "verification_result": {
+      "signal": "http.server.response.5xx.rate",
+      "baseline_value": 1.8,
+      "post_intervention_value": 54.2,
+      "recovery_band": { "max": 5.0 },
+      "measured_at": "2026-09-06T11:47:00Z",
+      "source_uri": "otlp://orders-service/metric/http.server.response.5xx.rate",
+      "_note_for_authors": "The intervention correctly ruled out the deploy, but did NOT fix the incident because the deploy is not the cause. The 5xx rate stays elevated (54.2 > band max 5.0). Auto-revert fires. The audit chain records: intervention_executed → verification_result(recovered=False) → auto_revert_triggered. Verdict provenance falls back to observational."
+    }
+  },
+
+  "probe_catalog": [
+    {
+      "probe_id": "P_db_deep",
+      "connector": "prometheus",
+      "measures": ["db_pressure_signal"],
+      "cost_ms": 480,
+      "load_class": "read_light",
+      "description": "orders-db deep pressure snapshot — IOPS, buffer hit rate, active connections"
+    },
+    {
+      "probe_id": "P_app_errors",
+      "connector": "logs",
+      "measures": ["app_error_signal"],
+      "cost_ms": 520,
+      "load_class": "read_light",
+      "description": "orders-service exception breakdown by class, 11:34–11:42"
+    }
+  ]
+}

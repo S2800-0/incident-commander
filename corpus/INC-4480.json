@@ -1,0 +1,188 @@
+{
+  "bundle_version": "1.0",
+  "incident_id": "INC-4480",
+  "slice": "deployment_induced",
+  "title": "Internal analytics batch failing after deploy — no customer surface, low CIS",
+
+  "ground_truth": {
+    "root_cause_id": "H1",
+    "summary": "Deploy v1.8.0 to analytics-batch-service introduced a regression in the nightly-aggregation SQL — the batch job fails on empty partitions. events-loader (which also reads from the shared warehouse but did NOT get the deploy) still runs clean, proving the fault is the deploy, not the warehouse. Same mechanism as INC-4479, but this incident is internal-only and low-priority per customer_impact. Together the two bundles prove CIS deprioritises correctly regardless of diagnostic mechanism.",
+    "rollback_correct": true
+  },
+
+  "human_baseline_seconds": 2100,
+
+  "alert": {
+    "service": "analytics-batch-service",
+    "environment": "production",
+    "severity": "SEV-4",
+    "fired_at": "2026-09-05T02:14:08Z",
+    "signal": "batch_job_failure_rate",
+    "condition": "failure rate 78% > threshold 5%",
+    "source": "cron"
+  },
+
+  "topology": {
+    "nodes": ["analytics-batch-service", "events-loader", "warehouse"],
+    "edges": [
+      { "from": "analytics-batch-service", "to": "warehouse" },
+      { "from": "events-loader", "to": "warehouse" }
+    ]
+  },
+
+  "observables": [
+    { "name": "sibling_service_errors", "unit": "pct", "desc": "events-loader failure rate (shares warehouse, did NOT get the deploy)" },
+    { "name": "error_type_breakdown",   "unit": "map", "desc": "analytics-batch-service errors grouped by exception class" }
+  ],
+
+  "customer_impact": {
+    "tier": "P3",
+    "affected_users": 25,
+    "sla_breach": false,
+    "revenue_tagged_service": false,
+    "impact_source": "internal analytics dashboard delayed — 25 engineering / product users see stale numbers",
+    "_note_for_authors": "Contrast case for INC-4479. Same mechanism, same root-cause type, but no customer surface. CIS should be ~5 (P3 base) + 0.05 (users) = ~5.05 → 'low' urgency. Proves the customer-impact score correctly deprioritises this incident even though the diagnostic verdict is identical shape."
+  },
+
+  "seed_hypotheses": [
+    {
+      "id": "H1",
+      "claim": "The 02:00 deploy v1.8.0 introduced a SQL regression in the nightly aggregation; roll it back.",
+      "natural_owner": "change_agent",
+      "predicted_observations": [
+        { "observable": "sibling_service_errors", "prediction": "stays_healthy", "note": "if the deploy is at fault, only analytics-batch-service should fail; events-loader (no deploy) should be fine" }
+      ]
+    },
+    {
+      "id": "H2",
+      "claim": "The shared warehouse is degraded and is failing every job regardless of deploy.",
+      "natural_owner": "telemetry_agent",
+      "predicted_observations": [
+        { "observable": "sibling_service_errors", "prediction": "also_failing", "note": "events-loader also reads from the warehouse and should fail too if the warehouse is at fault" }
+      ]
+    }
+  ],
+
+  "evidence": {
+    "prior": [
+      {
+        "source_type": "deployment",
+        "source_uri": "github://analytics-batch-service/deploys/v1.8.0",
+        "retrieved_at": "2026-09-05T02:14:12Z",
+        "measures": [],
+        "probe_id": null,
+        "payload": {
+          "version": "v1.8.0",
+          "deployed_at": "2026-09-05T02:00:00Z",
+          "deployed_by": "n.tarek",
+          "commit_sha": "d3ab429"
+        }
+      },
+      {
+        "source_type": "diff",
+        "source_uri": "github://analytics-batch-service/commit/d3ab429",
+        "retrieved_at": "2026-09-05T02:14:14Z",
+        "measures": [],
+        "probe_id": null,
+        "payload": {
+          "commit_sha": "d3ab429",
+          "files": [
+            { "path": "src/aggregations/nightly.sql", "hunk": "-        SELECT ... FROM events WHERE ...\n+        SELECT ... FROM events WHERE ... JOIN partitions p USING (event_date)" }
+          ]
+        }
+      },
+      {
+        "source_type": "metric",
+        "source_uri": "prometheus://analytics-batch-service/batch_job_failure_rate",
+        "retrieved_at": "2026-09-05T02:14:16Z",
+        "measures": [],
+        "probe_id": null,
+        "payload": {
+          "unit": "pct",
+          "series": [
+            ["2026-09-05T02:00:00Z", 1.0],
+            ["2026-09-05T02:07:00Z", 42.0],
+            ["2026-09-05T02:14:00Z", 78.0]
+          ]
+        }
+      },
+      {
+        "source_type": "metric",
+        "source_uri": "prometheus://warehouse/query_latency_p95",
+        "retrieved_at": "2026-09-05T02:14:18Z",
+        "measures": [],
+        "probe_id": null,
+        "_note_for_authors": "Warehouse is HEALTHY from prior — flat latency. This makes H2 (warehouse degradation) unlikely from prior; the sibling probe is the clean confirmation.",
+        "payload": {
+          "unit": "ms",
+          "series": [
+            ["2026-09-05T02:00:00Z", 220],
+            ["2026-09-05T02:07:00Z", 232],
+            ["2026-09-05T02:14:00Z", 225]
+          ]
+        }
+      },
+      {
+        "source_type": "prior_incident",
+        "source_uri": "vectordb://incidents/INC-2988",
+        "retrieved_at": "2026-09-05T02:14:20Z",
+        "measures": [],
+        "probe_id": null,
+        "payload": {
+          "incident_id": "INC-2988",
+          "signature": "batch SQL regression introduced by deploy",
+          "resolution": "Rolled back the offending deploy; the next scheduled run succeeded."
+        }
+      }
+    ],
+
+    "probeable": [
+      {
+        "source_type": "probe_result",
+        "source_uri": "prometheus://events-loader/batch_job_failure_rate",
+        "retrieved_at": null,
+        "measures": ["sibling_service_errors"],
+        "probe_id": "P_sibling",
+        "_note_for_authors": "THE DISCRIMINATOR. events-loader reads from the shared warehouse but did NOT get the deploy. It stays healthy. Impossible if the warehouse were at fault — confirms the deploy.",
+        "payload": {
+          "unit": "pct",
+          "series": [
+            ["2026-09-05T02:00:00Z", 0.5],
+            ["2026-09-05T02:07:00Z", 0.6],
+            ["2026-09-05T02:14:00Z", 0.4]
+          ]
+        }
+      },
+      {
+        "source_type": "probe_result",
+        "source_uri": "logs://analytics-batch-service/error_breakdown",
+        "retrieved_at": null,
+        "measures": ["error_type_breakdown"],
+        "probe_id": "P_err_types",
+        "_note_for_authors": "Distractor probe: all errors are SqlPartitionError. Info-gain = 0 for the seed hypotheses.",
+        "payload": {
+          "map": { "SqlPartitionError": 312, "WarehouseTimeout": 0, "AuthError": 0 }
+        }
+      }
+    ]
+  },
+
+  "probe_catalog": [
+    {
+      "probe_id": "P_sibling",
+      "connector": "prometheus",
+      "measures": ["sibling_service_errors"],
+      "cost_ms": 380,
+      "load_class": "read_light",
+      "description": "events-loader failure rate (shares warehouse, no deploy), 01:55–02:15"
+    },
+    {
+      "probe_id": "P_err_types",
+      "connector": "logs",
+      "measures": ["error_type_breakdown"],
+      "cost_ms": 550,
+      "load_class": "read_light",
+      "description": "analytics-batch-service error class breakdown, 02:00–02:14"
+    }
+  ]
+}

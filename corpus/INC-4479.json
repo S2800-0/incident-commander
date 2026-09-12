@@ -1,0 +1,188 @@
+{
+  "bundle_version": "1.0",
+  "incident_id": "INC-4479",
+  "slice": "deployment_induced",
+  "title": "Payment 5xx spike after payment-service deploy — revenue path affected",
+
+  "ground_truth": {
+    "root_cause_id": "H1",
+    "summary": "Deploy v3.4.0 to payment-service introduced a null-dereference in the card-tokenization path; only /pay endpoints fail. refund-service (which also calls the external card-processor but did NOT receive the deploy) stays healthy — this proves the fault is the deploy, not the external processor. Rollback of v3.4.0 is the correct fix. Distinct from INC-4475 by service (payment vs checkout) and blast radius (P0 revenue path).",
+    "rollback_correct": true
+  },
+
+  "human_baseline_seconds": 1800,
+
+  "alert": {
+    "service": "payment-service",
+    "environment": "production",
+    "severity": "SEV-1",
+    "fired_at": "2026-09-05T14:22:15Z",
+    "signal": "http_5xx_rate",
+    "condition": "error rate 14.2% > threshold 2%",
+    "source": "pagerduty"
+  },
+
+  "topology": {
+    "nodes": ["payment-service", "refund-service", "external-card-processor"],
+    "edges": [
+      { "from": "payment-service", "to": "external-card-processor" },
+      { "from": "refund-service", "to": "external-card-processor" }
+    ]
+  },
+
+  "observables": [
+    { "name": "sibling_service_errors", "unit": "pct", "desc": "refund-service error rate (shares external-card-processor, did NOT get the deploy)" },
+    { "name": "error_type_breakdown",   "unit": "map", "desc": "payment-service errors grouped by exception class" }
+  ],
+
+  "customer_impact": {
+    "tier": "P0",
+    "affected_users": 25000,
+    "sla_breach": true,
+    "revenue_tagged_service": true,
+    "impact_source": "payment-service POST /pay — direct revenue path, customer cannot complete checkout",
+    "_note_for_authors": "Highest-CIS bundle in the corpus. SLA 99.95% availability + p95 < 2000ms both breached. 25k affected users during the 18-minute window."
+  },
+
+  "seed_hypotheses": [
+    {
+      "id": "H1",
+      "claim": "The 14:16 deploy v3.4.0 introduced a null-dereference in card tokenization and broke payment; roll it back.",
+      "natural_owner": "change_agent",
+      "predicted_observations": [
+        { "observable": "sibling_service_errors", "prediction": "stays_healthy", "note": "if the deploy is the cause, only payment-service should fail; refund-service (no deploy) should be fine" }
+      ]
+    },
+    {
+      "id": "H2",
+      "claim": "The external card-processor is degraded and is failing every caller regardless of deploy.",
+      "natural_owner": "telemetry_agent",
+      "predicted_observations": [
+        { "observable": "sibling_service_errors", "prediction": "also_failing", "note": "refund-service also uses the processor and should fail too if the processor is at fault" }
+      ]
+    }
+  ],
+
+  "evidence": {
+    "prior": [
+      {
+        "source_type": "deployment",
+        "source_uri": "github://payment-service/deploys/v3.4.0",
+        "retrieved_at": "2026-09-05T14:22:20Z",
+        "measures": [],
+        "probe_id": null,
+        "payload": {
+          "version": "v3.4.0",
+          "deployed_at": "2026-09-05T14:16:00Z",
+          "deployed_by": "s.mohamed",
+          "commit_sha": "a72f11c"
+        }
+      },
+      {
+        "source_type": "diff",
+        "source_uri": "github://payment-service/commit/a72f11c",
+        "retrieved_at": "2026-09-05T14:22:22Z",
+        "measures": [],
+        "probe_id": null,
+        "payload": {
+          "commit_sha": "a72f11c",
+          "files": [
+            { "path": "src/tokenizer/card.py", "hunk": "-        card_meta = token.get_meta()\n+        card_meta = token.get_meta().card_brand" }
+          ]
+        }
+      },
+      {
+        "source_type": "metric",
+        "source_uri": "prometheus://payment-service/http_5xx_rate",
+        "retrieved_at": "2026-09-05T14:22:24Z",
+        "measures": [],
+        "probe_id": null,
+        "payload": {
+          "unit": "pct",
+          "series": [
+            ["2026-09-05T14:16:00Z", 0.1],
+            ["2026-09-05T14:19:00Z", 4.4],
+            ["2026-09-05T14:22:00Z", 14.2]
+          ]
+        }
+      },
+      {
+        "source_type": "metric",
+        "source_uri": "prometheus://external-card-processor/response_latency_p95",
+        "retrieved_at": "2026-09-05T14:22:26Z",
+        "measures": [],
+        "probe_id": null,
+        "_note_for_authors": "External processor is HEALTHY from prior — flat p95 latency, well under threshold. Makes the processor-degradation story (H2) unlikely from prior; the sibling probe is the clean confirmation.",
+        "payload": {
+          "unit": "ms",
+          "series": [
+            ["2026-09-05T14:16:00Z", 82.0],
+            ["2026-09-05T14:19:00Z", 84.0],
+            ["2026-09-05T14:22:00Z", 83.0]
+          ]
+        }
+      },
+      {
+        "source_type": "prior_incident",
+        "source_uri": "vectordb://incidents/INC-3140",
+        "retrieved_at": "2026-09-05T14:22:28Z",
+        "measures": [],
+        "probe_id": null,
+        "payload": {
+          "incident_id": "INC-3140",
+          "signature": "null-dereference introduced by deploy, single service 5xx",
+          "resolution": "Rolled back the offending deploy; errors cleared immediately."
+        }
+      }
+    ],
+
+    "probeable": [
+      {
+        "source_type": "probe_result",
+        "source_uri": "prometheus://refund-service/http_5xx_rate",
+        "retrieved_at": null,
+        "measures": ["sibling_service_errors"],
+        "probe_id": "P_sibling",
+        "_note_for_authors": "THE DISCRIMINATOR. refund-service shares the external-card-processor but did NOT get the deploy. It stays healthy (<0.3%). That is impossible if the processor were at fault (H2) — it confirms the deploy (H1). rollback_correct=true hinges on this.",
+        "payload": {
+          "unit": "pct",
+          "series": [
+            ["2026-09-05T14:16:00Z", 0.1],
+            ["2026-09-05T14:19:00Z", 0.2],
+            ["2026-09-05T14:22:00Z", 0.2]
+          ]
+        }
+      },
+      {
+        "source_type": "probe_result",
+        "source_uri": "logs://payment-service/error_breakdown",
+        "retrieved_at": null,
+        "measures": ["error_type_breakdown"],
+        "probe_id": "P_err_types",
+        "_note_for_authors": "Distractor probe: all errors are NullPointer (consistent with H1) but the seed hypotheses don't make opposing predictions on error_type_breakdown, so its info-gain is 0 — the mechanism should skip it and pick P_sibling.",
+        "payload": {
+          "map": { "NullPointer": 1420, "ProcessorTimeout": 0, "AuthError": 3 }
+        }
+      }
+    ]
+  },
+
+  "probe_catalog": [
+    {
+      "probe_id": "P_sibling",
+      "connector": "prometheus",
+      "measures": ["sibling_service_errors"],
+      "cost_ms": 340,
+      "load_class": "read_light",
+      "description": "refund-service 5xx rate (shares external-card-processor, no deploy), 14:14–14:23"
+    },
+    {
+      "probe_id": "P_err_types",
+      "connector": "logs",
+      "measures": ["error_type_breakdown"],
+      "cost_ms": 610,
+      "load_class": "read_light",
+      "description": "payment-service error class breakdown, 14:16–14:22"
+    }
+  ]
+}
