@@ -3,10 +3,11 @@
 Event types (all dicts with a `type` key):
   agent_started, hypothesis_proposed, posterior_updated, ambiguity_detected,
   probe_selected, probe_result, hypothesis_eliminated, exhausted, gate_pending,
-  verdict, chain_sealed
+  policy_decision, action_blocked, verdict, chain_sealed
 """
 from __future__ import annotations
 
+import os
 import time
 from dataclasses import dataclass, field
 from typing import Callable, Optional
@@ -16,11 +17,18 @@ from .adjudicator import (TAU, apply_probe_result, decide, ranked, reconcile,
 from .agents import Contribution, change_agent, history_agent, telemetry_agent, triage
 from .agents.llm_lens import llm_contributions
 from .bundle import Bundle
+from .cis import compute as compute_cis
+from .cis import to_evidence_item as cis_evidence_item
+from .dynamic_triage import (dynamic_enabled_from_env,
+                              dynamic_seed_hypotheses)
 from .evidence_chain import seal
 from .llm import llm_enabled
 from .models import EvidenceItem, Hypothesis, Probe, Verdict
+from .policy import (build_input_for_intervention, build_input_for_rollback,
+                     evaluate_safely)
 from .probe import select_probe
 from .reasoner import is_rollback_hypothesis
+from .verification import run_verification
 from .voi import (STAGNATION_THRESHOLD, intervention_would_fire,
                   observation_stagnated, score_actions)
 
@@ -38,6 +46,7 @@ class RunResult:
     events: list[dict] = field(default_factory=list)
     probes_run: list[str] = field(default_factory=list)
     interventions_run: list[str] = field(default_factory=list)
+    verified_recovery: Optional[bool] = None
     time_to_conclusion_s: float = 0.0
     sealed: dict = field(default_factory=dict)
     cited_items: list[EvidenceItem] = field(default_factory=list)
@@ -47,13 +56,28 @@ def _noop(_e: dict) -> None:
     pass
 
 
+def _policy_enabled_from_env() -> bool:
+    return os.environ.get("IC_POLICY_ENABLED", "").lower() in ("1", "true", "yes", "on")
+
+
 def run_investigation(bundle: Bundle, probes_enabled: bool = True,
                       emit: Optional[Emit] = None, pacing: float = 0.0,
-                      use_llm: Optional[bool] = None) -> RunResult:
+                      use_llm: Optional[bool] = None,
+                      policy_enabled: Optional[bool] = None,
+                      dynamic_hypotheses: Optional[bool] = None) -> RunResult:
     # use_llm=None → auto-detect from env (IC_USE_LLM + a real key). The harness passes
     # use_llm=False explicitly so ablation numbers are always deterministic/reproducible.
+    # policy_enabled follows the same discipline — the graded harness passes False
+    # explicitly so ablation numbers do not depend on a running OPA container. The
+    # server (live demo) passes True so state-changing actions are policy-gated.
+    # dynamic_hypotheses follows the same pattern — the harness passes False so seeded
+    # hypotheses are used regardless of env; the live demo may opt in for LLM triage.
     if use_llm is None:
         use_llm = llm_enabled()
+    if policy_enabled is None:
+        policy_enabled = _policy_enabled_from_env()
+    if dynamic_hypotheses is None:
+        dynamic_hypotheses = dynamic_enabled_from_env()
     emit = emit or _noop
     events: list[dict] = []
 
@@ -67,7 +91,17 @@ def run_investigation(bundle: Bundle, probes_enabled: bool = True,
     t0 = time.time()
 
     # --- [1] triage: seed the competing hypotheses --------------------------
-    hyps: list[Hypothesis] = triage.seed_hypotheses(bundle)
+    # Two paths:
+    #   * seeded (default) — deterministic, reads bundle.seed_hypotheses.
+    #     Preserves reproducible ablation numbers.
+    #   * dynamic (opt-in)  — LLM-generated from raw context, populated with
+    #     the six enrichment fields (supporting/contradicting evidence,
+    #     predictions, discriminating signals, confidence). Falls back to
+    #     seeded transparently when the LLM is unavailable.
+    if dynamic_hypotheses:
+        hyps, dyn_meta = dynamic_seed_hypotheses(bundle, emit=_emit)
+    else:
+        hyps = triage.seed_hypotheses(bundle)
     session: list[EvidenceItem] = bundle.prior_evidence()
     resolvable = {e.ref() for e in session}
     logits: dict[str, float] = {h.id: 0.0 for h in hyps}
@@ -117,6 +151,7 @@ def run_investigation(bundle: Bundle, probes_enabled: bool = True,
     probe_loop_t0 = time.time()
     probes_run: list[str] = []
     interventions_run: list[str] = []
+    verified_recovery: Optional[bool] = None
     already = set()
     intervention_done = False
     voi_step = 0
@@ -150,16 +185,50 @@ def run_investigation(bundle: Bundle, probes_enabled: bool = True,
         # ---- Intervention execution path ---------------------------------
         # Runs when: observation has stagnated, the bundle authored an
         # intervention outcome, and we haven't already run one. The "execution"
-        # is against fixture data (same simulation model as probes); the human
-        # gate is emitted so the console can pause and require an Approve click.
+        # is against fixture data (same simulation model as probes).
+        #
+        # policy_enabled=True (server / live demo):
+        #   real OPA policy call decides ALLOW/DENY; on ALLOW the action executes
+        #   autonomously (no button); on DENY it is skipped with structured reasons
+        #   logged into the event stream and the evidence chain.
+        # policy_enabled=False (harness / tests):
+        #   the legacy UI-side pause event is emitted for the console to display,
+        #   and execution proceeds as before — this keeps ablation numbers
+        #   reproducible without a running OPA container.
         if stagnated and interv_available and not intervention_done:
             interv_id = interv_action.action_id
-            _emit({"type": "gate_pending", "action": "intervention",
-                   "intervention_id": interv_id,
-                   "description": interv_action.description,
-                   "safety_envelope": interv_action.safety_envelope,
-                   "note": "human approval required before intervention executes — "
-                           "console pauses here until Approve is clicked"})
+            cited_refs_now = sorted({r for h in hyps for r in h.evidence_refs})
+            top_posterior = ranked(hyps)[0].posterior if hyps else 0.0
+
+            if policy_enabled:
+                policy_input = build_input_for_intervention(
+                    incident_id=bundle.incident_id,
+                    posterior=top_posterior,
+                    evidence_refs=cited_refs_now,
+                    safety_envelope=interv_action.safety_envelope or {},
+                    observation_stagnated=True,
+                    action="intervention",
+                )
+                decision = evaluate_safely(policy_input)
+                _emit({**decision.to_event(),
+                       "intervention_id": interv_id,
+                       "description": interv_action.description})
+                if not decision.allow:
+                    _emit({"type": "action_blocked",
+                           "action": "intervention",
+                           "intervention_id": interv_id,
+                           "reasons": decision.reasons,
+                           "engine_available": decision.engine_available,
+                           "note": "policy denied — intervention NOT executed"})
+                    intervention_done = True   # do not retry the same denied action
+                    continue
+            else:
+                _emit({"type": "gate_pending", "action": "intervention",
+                       "intervention_id": interv_id,
+                       "description": interv_action.description,
+                       "safety_envelope": interv_action.safety_envelope,
+                       "note": "human approval required before intervention executes — "
+                               "console pauses here until Approve is clicked"})
 
             item = bundle.run_intervention(interv_id, probes_enabled=True)
             session.append(item)
@@ -188,6 +257,41 @@ def run_investigation(bundle: Bundle, probes_enabled: bool = True,
                     _emit({"type": "hypothesis_eliminated", "id": h.id,
                            "reason": h.eliminated_reason,
                            "source": "intervention"})
+
+            # -------------------- verification loop --------------------
+            # Only when policy_enabled=True (live demo). The graded harness
+            # keeps its output shape stable — verification is orthogonal to
+            # the ablation numbers.
+            if policy_enabled:
+                _emit({"type": "verification_started",
+                       "intervention_id": interv_id,
+                       "note": "checking recovery signal against band"})
+                winner_now = ranked(hyps)[0] if hyps else None
+                v = run_verification(bundle, interv_id, session, winner=winner_now)
+                verified_recovery = v.recovered
+
+                # The verification evidence is real, sealable, cited.
+                session.append(v.evidence_item)
+                resolvable.add(v.evidence_item.ref())
+
+                _emit({"type": "verification_result",
+                       "intervention_id": interv_id,
+                       "recovered": v.recovered,
+                       "signal": v.signal,
+                       "baseline_value": v.baseline_value,
+                       "post_intervention_value": v.post_value,
+                       "recovery_band": v.recovery_band,
+                       "reasoning": v.reasoning,
+                       "source_uri": v.source_uri,
+                       "synthesised": v.synthesised,
+                       "hash": v.evidence_item.content_hash()[:12]})
+
+                if not v.recovered:
+                    _emit({"type": "auto_revert_triggered",
+                           "intervention_id": interv_id,
+                           "reason": "recovery signal outside band; enforced envelope revert",
+                           "safety_envelope": interv_action.safety_envelope})
+
             continue  # re-score; loop will conclude next iteration
 
         if intervention_would_fire(actions) and not interv_available:
@@ -250,6 +354,15 @@ def run_investigation(bundle: Bundle, probes_enabled: bool = True,
     winner = ranked(hyps)[0]
     rollback = is_rollback_hypothesis(winner.claim)
     used_refs = sorted({r for h in hyps for r in h.evidence_refs})
+    # Interventions that did NOT verify collapse the provenance back to
+    # observational — the intervention data was gathered but did not resolve
+    # the incident, so the verdict rests on observation.
+    if interventions_run and verified_recovery is False:
+        provenance = "observational"
+    elif interventions_run:
+        provenance = "interventional"
+    else:
+        provenance = "observational"
     verdict = Verdict(
         incident_id=bundle.incident_id,
         root_cause_id=winner.id,
@@ -259,15 +372,59 @@ def run_investigation(bundle: Bundle, probes_enabled: bool = True,
         hypotheses=hyps,
         probes_run=probes_run,
         evidence_refs=used_refs,
-        provenance="interventional" if interventions_run else "observational",
+        provenance=provenance,
+        verified_recovery=verified_recovery,
     )
 
     _emit({"type": "provenance_labeled", "provenance": verdict.provenance,
            "interventions_run": interventions_run})
 
     if rollback:
-        _emit({"type": "gate_pending", "action": "rollback",
-               "note": "state-changing action requires explicit approval — not auto-fired"})
+        if policy_enabled:
+            # Rollback is a recommendation from the mechanism, executed
+            # downstream (Argo Rollouts / your deploy tool). The policy call
+            # here says whether it WOULD be permitted; it is informational and
+            # sealed into the audit trail with the same shape as the
+            # intervention-side decision.
+            rb_input = build_input_for_rollback(
+                incident_id=bundle.incident_id,
+                posterior=verdict.posterior,
+                evidence_refs=used_refs,
+                deploy_recent=True,
+                upstream_outage=False,
+            )
+            rb_decision = evaluate_safely(rb_input)
+            _emit({**rb_decision.to_event(),
+                   "note": "policy check on the rollback recommendation — "
+                           "execution belongs to the deploy tool, not this system"})
+        else:
+            _emit({"type": "gate_pending", "action": "rollback",
+                   "note": "state-changing action requires explicit approval — not auto-fired"})
+
+    # --- customer-impact scoring (AFTER the diagnostic verdict, on purpose) -
+    # CIS is operational urgency, ORTHOGONAL to the diagnosis. Computing it
+    # here — after `winner`, `posterior`, and `rollback_recommended` are
+    # already frozen into `verdict` — makes it structurally impossible for
+    # CIS to have influenced the diagnostic path. Sealed as a real evidence
+    # leaf so the audit trail includes it.
+    impact = compute_cis(bundle.raw)
+    if impact is not None:
+        _emit(impact.to_event())
+        cis_item = cis_evidence_item(bundle.incident_id, impact)
+        session.append(cis_item)
+        resolvable.add(cis_item.ref())
+        used_refs = sorted(set(used_refs) | {cis_item.ref()})
+        verdict.customer_impact = {
+            "cis_score":                impact.cis_score,
+            "tier":                     impact.tier,
+            "affected_users":           impact.affected_users,
+            "sla_breach":               impact.sla_breach,
+            "revenue_tagged_service":   impact.revenue_tagged_service,
+            "impact_source":            impact.impact_source,
+            "urgency_label":            impact.as_urgency_label(),
+            "components":               dict(impact.components),
+        }
+        verdict.evidence_refs = used_refs
 
     # --- seal the evidence chain -------------------------------------------
     used_items = [e for e in session if e.ref() in set(used_refs)]
@@ -285,5 +442,6 @@ def run_investigation(bundle: Bundle, probes_enabled: bool = True,
 
     return RunResult(verdict=verdict, events=events, probes_run=probes_run,
                      interventions_run=interventions_run,
+                     verified_recovery=verified_recovery,
                      time_to_conclusion_s=round(result_time, 3),
                      sealed=sealed, cited_items=used_items)

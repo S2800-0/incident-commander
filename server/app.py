@@ -19,6 +19,8 @@ from fastapi.responses import JSONResponse
 from ic.bundle import load_bundle, load_corpus
 from ic.harness import main as run_harness
 from ic.orchestrator import run_investigation
+from ic.otlp import (OtlpLogsPayload, OtlpMetricsPayload, logs_to_evidence,
+                     metrics_to_evidence)
 
 ROOT = Path(__file__).resolve().parent.parent
 CORPUS = ROOT / "corpus"
@@ -52,6 +54,56 @@ def harness():
     if not path.exists():
         run_harness(str(CORPUS), str(path))
     return JSONResponse(json.loads(path.read_text()))
+
+
+# ---------------------------------------------------------------------------
+# OTLP ingestion endpoints — real OpenTelemetry HTTP JSON receivers.
+#
+# In production these sit behind an OTel Collector that batches metrics/logs
+# from your applications. For the demo, NiFi (or a `curl` from the corpus
+# bridge in `demo/otlp_bridge.py`) posts spec-compliant OTLP JSON here. Every
+# accepted batch is converted to typed `EvidenceItem`s and appended to
+# `_ingest_buffer` so a subsequent /investigate can consume them as the prior
+# evidence for an incident.
+#
+# Buffer is deliberately in-memory for now — Cassandra persistence lands with
+# the evidence-chain durability piece later this week.
+# ---------------------------------------------------------------------------
+
+_ingest_buffer: list[dict] = []
+_INGEST_CAP = 5000  # bounded to avoid unbounded growth from a mis-configured feed
+
+
+def _remember(items: list) -> None:
+    for it in items:
+        _ingest_buffer.append(it.model_dump(mode="json"))
+    while len(_ingest_buffer) > _INGEST_CAP:
+        _ingest_buffer.pop(0)
+
+
+@app.post("/ingest/otlp/v1/metrics")
+def ingest_otlp_metrics(payload: OtlpMetricsPayload) -> dict:
+    items = metrics_to_evidence(payload)
+    _remember(items)
+    return {"accepted": len(items),
+            "kinds": sorted({it.payload.get("metric.kind", "") for it in items}),
+            "sources": sorted({it.source_uri for it in items})[:16]}
+
+
+@app.post("/ingest/otlp/v1/logs")
+def ingest_otlp_logs(payload: OtlpLogsPayload) -> dict:
+    items = logs_to_evidence(payload)
+    _remember(items)
+    return {"accepted": len(items),
+            "records": sum(it.payload.get("record_count", 0) for it in items),
+            "sources": sorted({it.source_uri for it in items})[:16]}
+
+
+@app.get("/ingest/otlp/buffer")
+def ingest_buffer(limit: int = 50) -> dict:
+    """Peek at recent items — helps the demo prove ingestion is real."""
+    items = _ingest_buffer[-max(0, min(limit, len(_ingest_buffer))):]
+    return {"size": len(_ingest_buffer), "returned": len(items), "items": items}
 
 
 @app.post("/investigate")

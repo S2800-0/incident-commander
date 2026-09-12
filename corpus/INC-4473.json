@@ -2,16 +2,13 @@
   "bundle_version": "1.0",
   "incident_id": "INC-4473",
   "slice": "resource_exhaustion",
-  "title": "Slow 40-minute latency creep on api-service — a leak, or just a traffic surge?",
-
+  "title": "Slow 40-minute latency creep on api-service \u2014 a leak, or just a traffic surge?",
   "ground_truth": {
     "root_cause_id": "H1",
-    "summary": "A memory leak causes heap growth and lengthening GC pauses proportional to pod uptime. Traffic did rise ~30% from a campaign, making a capacity story superficially plausible, but the tell is that latency tracks per-pod uptime/heap, not request volume: a freshly restarted pod is fast under the same traffic, while the oldest pods are slowest. Correct remediation is a rolling restart plus a heap-fix roll-forward, NOT scaling out. Rolling back the last deploy would not help — the leak predates it.",
+    "summary": "A memory leak causes heap growth and lengthening GC pauses proportional to pod uptime. Traffic did rise ~30% from a campaign, making a capacity story superficially plausible, but the tell is that latency tracks per-pod uptime/heap, not request volume: a freshly restarted pod is fast under the same traffic, while the oldest pods are slowest. Correct remediation is a rolling restart plus a heap-fix roll-forward, NOT scaling out. Rolling back the last deploy would not help \u2014 the leak predates it.",
     "rollback_correct": false
   },
-
   "human_baseline_seconds": 3000,
-
   "alert": {
     "service": "api-service",
     "environment": "production",
@@ -21,28 +18,51 @@
     "condition": "p95 1,900ms > threshold 800ms",
     "source": "pagerduty"
   },
-
   "topology": {
-    "nodes": ["api-service", "auth-service", "postgres-main"],
+    "nodes": [
+      "api-service",
+      "auth-service",
+      "postgres-main"
+    ],
     "edges": [
-      { "from": "api-service", "to": "auth-service" },
-      { "from": "api-service", "to": "postgres-main" }
+      {
+        "from": "api-service",
+        "to": "auth-service"
+      },
+      {
+        "from": "api-service",
+        "to": "postgres-main"
+      }
     ]
   },
-
   "observables": [
-    { "name": "request_rate",       "unit": "rps",  "desc": "incoming requests per second to api-service" },
-    { "name": "gc_pause_by_pod",     "unit": "map",  "desc": "GC pause time per pod, tagged with pod uptime" },
-    { "name": "latency_by_pod_age",  "unit": "map",  "desc": "p95 latency split by pod age cohort" }
+    {
+      "name": "request_rate",
+      "unit": "rps",
+      "desc": "incoming requests per second to api-service"
+    },
+    {
+      "name": "gc_pause_by_pod",
+      "unit": "map",
+      "desc": "GC pause time per pod, tagged with pod uptime"
+    },
+    {
+      "name": "latency_by_pod_age",
+      "unit": "map",
+      "desc": "p95 latency split by pod age cohort"
+    }
   ],
-
   "seed_hypotheses": [
     {
       "id": "H1",
       "claim": "Memory leak: heap growth and GC pauses scale with pod uptime; restart fixes it.",
       "natural_owner": "telemetry_agent",
       "predicted_observations": [
-        { "observable": "latency_by_pod_age", "prediction": "old_pods_slower", "note": "latency correlates with pod age, not with traffic" }
+        {
+          "observable": "latency_by_pod_age",
+          "prediction": "old_pods_slower",
+          "note": "latency correlates with pod age, not with traffic"
+        }
       ]
     },
     {
@@ -50,11 +70,14 @@
       "claim": "Legitimate traffic spike from the campaign is exceeding capacity; scale out.",
       "natural_owner": "change_agent",
       "predicted_observations": [
-        { "observable": "latency_by_pod_age", "prediction": "uniform_across_pods", "note": "if it is load, all pods degrade equally regardless of age" }
+        {
+          "observable": "latency_by_pod_age",
+          "prediction": "uniform_across_pods",
+          "note": "if it is load, all pods degrade equally regardless of age"
+        }
       ]
     }
   ],
-
   "evidence": {
     "prior": [
       {
@@ -66,10 +89,22 @@
         "payload": {
           "unit": "ms",
           "series": [
-            ["2026-07-10T18:00:00Z", 210.0],
-            ["2026-07-10T18:15:00Z", 480.0],
-            ["2026-07-10T18:30:00Z", 1200.0],
-            ["2026-07-10T18:40:00Z", 1900.0]
+            [
+              "2026-07-10T18:00:00Z",
+              210.0
+            ],
+            [
+              "2026-07-10T18:15:00Z",
+              480.0
+            ],
+            [
+              "2026-07-10T18:30:00Z",
+              1200.0
+            ],
+            [
+              "2026-07-10T18:40:00Z",
+              1900.0
+            ]
           ]
         }
       },
@@ -77,15 +112,26 @@
         "source_type": "metric",
         "source_uri": "prometheus://api-service/request_rate",
         "retrieved_at": "2026-07-10T18:40:11Z",
-        "measures": ["request_rate"],
+        "measures": [
+          "request_rate"
+        ],
         "probe_id": null,
         "_note_for_authors": "THE TRAP: traffic genuinely rose ~30% (campaign). This makes a capacity/scale-out story (H2) plausible from prior alone. But a 30% rise does not explain a 9x latency increase.",
         "payload": {
           "unit": "rps",
           "series": [
-            ["2026-07-10T18:00:00Z", 1200.0],
-            ["2026-07-10T18:20:00Z", 1420.0],
-            ["2026-07-10T18:40:00Z", 1560.0]
+            [
+              "2026-07-10T18:00:00Z",
+              1200.0
+            ],
+            [
+              "2026-07-10T18:20:00Z",
+              1420.0
+            ],
+            [
+              "2026-07-10T18:40:00Z",
+              1560.0
+            ]
           ]
         }
       },
@@ -95,13 +141,22 @@
         "retrieved_at": "2026-07-10T18:40:12Z",
         "measures": [],
         "probe_id": null,
-        "_note_for_authors": "Aggregate heap is rising but this is an AVERAGE across pods — it is suggestive of a leak but does not by itself distinguish leak from load (a busy service also uses more heap). The per-pod split (probe) is what decides it.",
+        "_note_for_authors": "Aggregate heap is rising but this is an AVERAGE across pods \u2014 it is suggestive of a leak but does not by itself distinguish leak from load (a busy service also uses more heap). The per-pod split (probe) is what decides it.",
         "payload": {
           "unit": "pct",
           "series": [
-            ["2026-07-10T18:00:00Z", 40.0],
-            ["2026-07-10T18:20:00Z", 62.0],
-            ["2026-07-10T18:40:00Z", 85.0]
+            [
+              "2026-07-10T18:00:00Z",
+              40.0
+            ],
+            [
+              "2026-07-10T18:20:00Z",
+              62.0
+            ],
+            [
+              "2026-07-10T18:40:00Z",
+              85.0
+            ]
           ]
         }
       },
@@ -111,7 +166,7 @@
         "retrieved_at": "2026-07-10T18:40:14Z",
         "measures": [],
         "probe_id": null,
-        "_note_for_authors": "A deploy exists but landed 3 days ago — a change-biased agent may still float 'roll it back'. Ground truth: leak predates it; rollback_correct=false.",
+        "_note_for_authors": "A deploy exists but landed 3 days ago \u2014 a change-biased agent may still float 'roll it back'. Ground truth: leak predates it; rollback_correct=false.",
         "payload": {
           "version": "v7.11.0",
           "deployed_at": "2026-07-07T10:00:00Z",
@@ -120,13 +175,14 @@
         }
       }
     ],
-
     "probeable": [
       {
         "source_type": "probe_result",
         "source_uri": "prometheus://api-service/latency_by_pod_age",
         "retrieved_at": null,
-        "measures": ["latency_by_pod_age"],
+        "measures": [
+          "latency_by_pod_age"
+        ],
         "probe_id": "P_pod_age",
         "_note_for_authors": "THE DISCRIMINATOR. Latency split by pod-age cohort: oldest pods ~2600ms, youngest (restarted 5 min ago) ~230ms, under identical traffic. That is the signature of a leak (H1) and is incompatible with a uniform capacity limit (H2, which predicts equal degradation across pods).",
         "payload": {
@@ -142,7 +198,9 @@
         "source_type": "probe_result",
         "source_uri": "prometheus://api-service/gc_pause_by_pod",
         "retrieved_at": null,
-        "measures": ["gc_pause_by_pod"],
+        "measures": [
+          "gc_pause_by_pod"
+        ],
         "probe_id": "P_gc",
         "_note_for_authors": "Supporting probe. GC pause time correlates with pod uptime. Confirms H1 mechanism but P_pod_age is the cleaner single-shot discriminator.",
         "payload": {
@@ -154,12 +212,13 @@
       }
     ]
   },
-
   "probe_catalog": [
     {
       "probe_id": "P_pod_age",
       "connector": "prometheus",
-      "measures": ["latency_by_pod_age"],
+      "measures": [
+        "latency_by_pod_age"
+      ],
       "cost_ms": 500,
       "load_class": "read_light",
       "description": "api-service p95 latency split by pod-age cohort, current"
@@ -167,10 +226,20 @@
     {
       "probe_id": "P_gc",
       "connector": "prometheus",
-      "measures": ["gc_pause_by_pod"],
+      "measures": [
+        "gc_pause_by_pod"
+      ],
       "cost_ms": 470,
       "load_class": "read_light",
       "description": "api-service GC pause time per pod vs uptime"
     }
-  ]
+  ],
+  "customer_impact": {
+    "tier": "P2",
+    "affected_users": 150,
+    "sla_breach": false,
+    "revenue_tagged_service": false,
+    "impact_source": "internal api-service latency creep \u2014 no customer-facing surface",
+    "_note_for_authors": "Slow leak on internal service. Some engineering-tool users affected but no customer or SLA impact."
+  }
 }

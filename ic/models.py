@@ -55,6 +55,14 @@ class Hypothesis(BaseModel):
     evidence_refs: list[str] = Field(default_factory=list)
     eliminated: bool = False
     eliminated_reason: str = ""
+    # Optional dynamic-triage enrichment (ic/dynamic_triage.py). Populated
+    # only when hypotheses are LLM-generated; seeded hypotheses leave these
+    # at their defaults so the graded harness stays byte-identical.
+    supporting_evidence: list[str] = Field(default_factory=list)
+    contradicting_evidence: list[str] = Field(default_factory=list)
+    discriminating_signals: list[str] = Field(default_factory=list)
+    confidence: Optional[float] = None
+    generated_by: Literal["seeded", "dynamic"] = "seeded"
 
 
 class Probe(BaseModel):
@@ -106,3 +114,12 @@ class Verdict(BaseModel):
     # VoI overlay: always "observational" in the prototype — the intervention
     # primitive is specified but never executed (see ic/voi.py).
     provenance: Literal["observational", "interventional"] = "observational"
+    # Post-intervention verification (verification.py). None when the loop
+    # never ran (no intervention or policy_enabled=False); True when the
+    # customer-facing signal returned to the recovery band; False when the
+    # intervention did not resolve the incident and auto-revert fired.
+    verified_recovery: Optional[bool] = None
+    # Customer-impact score (cis.py). Operational urgency, ORTHOGONAL to
+    # diagnostic scoring — never fed into hypothesis posteriors or VoI probe
+    # selection. None when the bundle carries no customer_impact block.
+    customer_impact: Optional[dict] = None

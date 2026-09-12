@@ -2,16 +2,13 @@
   "bundle_version": "1.0",
   "incident_id": "INC-4478",
   "slice": "ambiguous",
-  "title": "Checkout latency spike — DB overload, or a subtle deploy bug? Passive checks can't tell.",
-
+  "title": "Checkout latency spike \u2014 DB overload, or a subtle deploy bug? Passive checks can't tell.",
   "ground_truth": {
     "root_cause_id": "H2",
-    "summary": "Deploy v6.10.0 at 15:00 changed a hot query pattern in a way that quietly increased average query cost. Passive DB and app metrics both look elevated in ways consistent with EITHER a DB bottleneck (H1) OR a deploy bug (H2) — the two probes available return signals that are individually ambiguous, so passive observation stagnates. The only decisive test is causal: shift 5% of checkout traffic back to the pre-deploy version (v6.09.0). The old-version cohort recovers to baseline; the new-version cohort stays slow → the deploy is the cause. Rolling back v6.10.0 is correct.",
+    "summary": "Deploy v6.10.0 at 15:00 changed a hot query pattern in a way that quietly increased average query cost. Passive DB and app metrics both look elevated in ways consistent with EITHER a DB bottleneck (H1) OR a deploy bug (H2) \u2014 the two probes available return signals that are individually ambiguous, so passive observation stagnates. The only decisive test is causal: shift 5% of checkout traffic back to the pre-deploy version (v6.09.0). The old-version cohort recovers to baseline; the new-version cohort stays slow \u2192 the deploy is the cause. Rolling back v6.10.0 is correct.",
     "rollback_correct": true
   },
-
   "human_baseline_seconds": 3200,
-
   "alert": {
     "service": "checkout-service",
     "environment": "production",
@@ -21,43 +18,81 @@
     "condition": "p95 1,850ms > threshold 800ms",
     "source": "pagerduty"
   },
-
   "topology": {
-    "nodes": ["checkout-service", "orders-db"],
+    "nodes": [
+      "checkout-service",
+      "orders-db"
+    ],
     "edges": [
-      { "from": "checkout-service", "to": "orders-db" }
+      {
+        "from": "checkout-service",
+        "to": "orders-db"
+      }
     ]
   },
-
   "observables": [
-    { "name": "db_pressure_signal",   "unit": "map", "desc": "orders-db pressure snapshot — read IOPS, buffer hit rate, active connections" },
-    { "name": "app_error_signal",     "unit": "map", "desc": "checkout-service app-side exception breakdown by class" },
-    { "name": "traffic_cohort_split", "unit": "map", "desc": "p95 latency of the two version cohorts AFTER a controlled traffic-shift intervention" }
+    {
+      "name": "db_pressure_signal",
+      "unit": "map",
+      "desc": "orders-db pressure snapshot \u2014 read IOPS, buffer hit rate, active connections"
+    },
+    {
+      "name": "app_error_signal",
+      "unit": "map",
+      "desc": "checkout-service app-side exception breakdown by class"
+    },
+    {
+      "name": "traffic_cohort_split",
+      "unit": "map",
+      "desc": "p95 latency of the two version cohorts AFTER a controlled traffic-shift intervention"
+    }
   ],
-
   "seed_hypotheses": [
     {
       "id": "H1",
-      "claim": "The orders-db upstream dependency is bottlenecked under load — DB pressure is cascading into checkout latency.",
+      "claim": "The orders-db upstream dependency is bottlenecked under load \u2014 DB pressure is cascading into checkout latency.",
       "natural_owner": "telemetry_agent",
       "predicted_observations": [
-        { "observable": "db_pressure_signal",   "prediction": "shows_pressure",     "note": "under DB overload, IOPS/queue/connection metrics all read elevated" },
-        { "observable": "app_error_signal",     "prediction": "app_side_normal",    "note": "no app-side exceptions — the pain is downstream at the DB" },
-        { "observable": "traffic_cohort_split", "prediction": "cohorts_uniform",    "note": "if the DB is the bottleneck, both version cohorts share it — both stay slow after the shift" }
+        {
+          "observable": "db_pressure_signal",
+          "prediction": "shows_pressure",
+          "note": "under DB overload, IOPS/queue/connection metrics all read elevated"
+        },
+        {
+          "observable": "app_error_signal",
+          "prediction": "app_side_normal",
+          "note": "no app-side exceptions \u2014 the pain is downstream at the DB"
+        },
+        {
+          "observable": "traffic_cohort_split",
+          "prediction": "cohorts_uniform",
+          "note": "if the DB is the bottleneck, both version cohorts share it \u2014 both stay slow after the shift"
+        }
       ]
     },
     {
       "id": "H2",
-      "claim": "The 15:00 deploy v6.10.0 introduced a query pattern that increased query cost — the deploy is the cause.",
+      "claim": "The 15:00 deploy v6.10.0 introduced a query pattern that increased query cost \u2014 the deploy is the cause.",
       "natural_owner": "change_agent",
       "predicted_observations": [
-        { "observable": "db_pressure_signal",   "prediction": "shows_pressure",     "note": "the deploy's new query pattern ALSO drives DB metrics up — cheap DB signals look the same either way" },
-        { "observable": "app_error_signal",     "prediction": "app_side_normal",    "note": "no exceptions thrown; the bug is a slow-query pattern, not an error" },
-        { "observable": "traffic_cohort_split", "prediction": "cohorts_diverge",    "note": "if the deploy is the cause, only the new-version cohort stays slow after the shift" }
+        {
+          "observable": "db_pressure_signal",
+          "prediction": "shows_pressure",
+          "note": "the deploy's new query pattern ALSO drives DB metrics up \u2014 cheap DB signals look the same either way"
+        },
+        {
+          "observable": "app_error_signal",
+          "prediction": "app_side_normal",
+          "note": "no exceptions thrown; the bug is a slow-query pattern, not an error"
+        },
+        {
+          "observable": "traffic_cohort_split",
+          "prediction": "cohorts_diverge",
+          "note": "if the deploy is the cause, only the new-version cohort stays slow after the shift"
+        }
       ]
     }
   ],
-
   "evidence": {
     "prior": [
       {
@@ -83,7 +118,10 @@
         "payload": {
           "commit_sha": "e4c882d",
           "files": [
-            { "path": "src/orders/queries.py", "hunk": "-    return db.query(orders_by_user_stmt, user_id=user_id)\n+    return db.query(orders_by_user_enriched_stmt, user_id=user_id)  # joins order_items for pricing" }
+            {
+              "path": "src/orders/queries.py",
+              "hunk": "-    return db.query(orders_by_user_stmt, user_id=user_id)\n+    return db.query(orders_by_user_enriched_stmt, user_id=user_id)  # joins order_items for pricing"
+            }
           ]
         }
       },
@@ -96,10 +134,22 @@
         "payload": {
           "unit": "ms",
           "series": [
-            ["2026-07-12T15:00:00Z", 220.0],
-            ["2026-07-12T15:03:00Z", 810.0],
-            ["2026-07-12T15:05:00Z", 1450.0],
-            ["2026-07-12T15:07:00Z", 1850.0]
+            [
+              "2026-07-12T15:00:00Z",
+              220.0
+            ],
+            [
+              "2026-07-12T15:03:00Z",
+              810.0
+            ],
+            [
+              "2026-07-12T15:05:00Z",
+              1450.0
+            ],
+            [
+              "2026-07-12T15:07:00Z",
+              1850.0
+            ]
           ]
         }
       },
@@ -109,7 +159,7 @@
         "retrieved_at": "2026-07-12T15:07:15Z",
         "measures": [],
         "probe_id": null,
-        "_note_for_authors": "THE PATTERN-MATCH TRAP. This runbook describes an H1-shaped mechanism (database bottlenecked under load, pressure climbing, latency rising). history_agent will pattern-match it and boost H1 above H2 in the OFF arm — the invariant then holds: OFF picks wrong (H1), only intervention (ON with approval) can reveal H2 is true.",
+        "_note_for_authors": "THE PATTERN-MATCH TRAP. This runbook describes an H1-shaped mechanism (database bottlenecked under load, pressure climbing, latency rising). history_agent will pattern-match it and boost H1 above H2 in the OFF arm \u2014 the invariant then holds: OFF picks wrong (H1), only intervention (ON with approval) can reveal H2 is true.",
         "payload": {
           "title": "orders-db pressure under sustained load",
           "body": "Common symptoms: orders-db pressure climbing, checkout latency rising. Root cause is often the database bottlenecked under sustained load. Investigate connections, IOPS, buffer pool."
@@ -121,26 +171,36 @@
         "retrieved_at": "2026-07-12T15:07:16Z",
         "measures": [],
         "probe_id": null,
-        "_note_for_authors": "DB metrics rise ALONGSIDE the alert (not before) — deliberately, so the telemetry agent doesn't get the 'upstream-early' bonus and the two hypotheses land within τ. If DB rose before alert, H1 dominates and no probe fires.",
+        "_note_for_authors": "DB metrics rise ALONGSIDE the alert (not before) \u2014 deliberately, so the telemetry agent doesn't get the 'upstream-early' bonus and the two hypotheses land within \u03c4. If DB rose before alert, H1 dominates and no probe fires.",
         "payload": {
           "unit": "map",
           "series": [
-            ["2026-07-12T15:00:00Z", 42.0],
-            ["2026-07-12T15:05:00Z", 46.0],
-            ["2026-07-12T15:07:00Z", 84.0]
+            [
+              "2026-07-12T15:00:00Z",
+              42.0
+            ],
+            [
+              "2026-07-12T15:05:00Z",
+              46.0
+            ],
+            [
+              "2026-07-12T15:07:00Z",
+              84.0
+            ]
           ]
         }
       }
     ],
-
     "probeable": [
       {
         "source_type": "probe_result",
         "source_uri": "prometheus://orders-db/pressure_snapshot",
         "retrieved_at": null,
-        "measures": ["db_pressure_signal"],
+        "measures": [
+          "db_pressure_signal"
+        ],
         "probe_id": "P_db_deep",
-        "_note_for_authors": "AMBIGUOUS BY DESIGN. Payload SHOWS elevated pressure — but the prediction vocabulary ('shows_pressure' / 'app_side_normal') doesn't intersect any known interpreter vocab (ordering/threshold/dispersion/cohort). observed_label() returns None, apply_probe_result skips it — the probe RUNS but doesn't discriminate. This is what makes observation stagnate.",
+        "_note_for_authors": "AMBIGUOUS BY DESIGN. Payload SHOWS elevated pressure \u2014 but the prediction vocabulary ('shows_pressure' / 'app_side_normal') doesn't intersect any known interpreter vocab (ordering/threshold/dispersion/cohort). observed_label() returns None, apply_probe_result skips it \u2014 the probe RUNS but doesn't discriminate. This is what makes observation stagnate.",
         "payload": {
           "map": {
             "read_iops": 8400,
@@ -153,9 +213,11 @@
         "source_type": "probe_result",
         "source_uri": "logs://checkout-service/exception_breakdown",
         "retrieved_at": null,
-        "measures": ["app_error_signal"],
+        "measures": [
+          "app_error_signal"
+        ],
         "probe_id": "P_app_errors",
-        "_note_for_authors": "AMBIGUOUS BY DESIGN. Same pattern — payload shows no notable exceptions (both hypotheses predicted this), but the prediction vocab ('app_side_normal') doesn't dispatch to an interpreter. Probe runs, observation gains nothing.",
+        "_note_for_authors": "AMBIGUOUS BY DESIGN. Same pattern \u2014 payload shows no notable exceptions (both hypotheses predicted this), but the prediction vocab ('app_side_normal') doesn't dispatch to an interpreter. Probe runs, observation gains nothing.",
         "payload": {
           "map": {
             "NullPointer": 0,
@@ -165,15 +227,16 @@
         }
       }
     ],
-
     "intervention_results": [
       {
         "source_type": "intervention_result",
         "source_uri": "traffic-controller://checkout-service/cohort_split_v6.09.0_vs_v6.10.0",
         "retrieved_at": "2026-07-12T15:12:30Z",
-        "measures": ["traffic_cohort_split"],
+        "measures": [
+          "traffic_cohort_split"
+        ],
         "probe_id": "I_traffic_shift",
-        "_note_for_authors": "THE CAUSAL DISCRIMINATOR. Only reachable AFTER observation stagnates AND a human approves the intervention. Old-version cohort (v6.09.0) recovers to ~200ms; new-version cohort (v6.10.0) stays at ~1700ms. Dispersion ratio ~8.5 → cohorts_diverge → confirms H2 (deploy caused it), eliminates H1 (DB would have affected both cohorts equally).",
+        "_note_for_authors": "THE CAUSAL DISCRIMINATOR. Only reachable AFTER observation stagnates AND a human approves the intervention. Old-version cohort (v6.09.0) recovers to ~200ms; new-version cohort (v6.10.0) stays at ~1700ms. Dispersion ratio ~8.5 \u2192 cohorts_diverge \u2192 confirms H2 (deploy caused it), eliminates H1 (DB would have affected both cohorts equally).",
         "payload": {
           "map": {
             "cohort_v_new_p95_ms": 1720.0,
@@ -181,25 +244,47 @@
           }
         }
       }
-    ]
+    ],
+    "verification_result": {
+      "signal": "http.server.response.5xx.rate",
+      "baseline_value": 2.1,
+      "post_intervention_value": 2.4,
+      "recovery_band": {
+        "max": 5.0
+      },
+      "measured_at": "2026-07-12T15:12:00Z",
+      "source_uri": "otlp://checkout-service/metric/http.server.response.5xx.rate",
+      "_note_for_authors": "After the 5% canary shifted checkout traffic back to v6.09.0, the 5xx rate on the canary cohort returned to near-baseline (2.4 vs 2.1 pre-incident). The rate on the new-version cohort remained elevated \u2014 the discriminating result that identified H2 as the cause. Recovery band max=5.0 confirms the intervention actually worked; not just that the mechanism picked the right hypothesis."
+    }
   },
-
   "probe_catalog": [
     {
       "probe_id": "P_db_deep",
       "connector": "prometheus",
-      "measures": ["db_pressure_signal"],
+      "measures": [
+        "db_pressure_signal"
+      ],
       "cost_ms": 480,
       "load_class": "read_light",
-      "description": "orders-db deep pressure snapshot — IOPS, buffer hit, active connections"
+      "description": "orders-db deep pressure snapshot \u2014 IOPS, buffer hit, active connections"
     },
     {
       "probe_id": "P_app_errors",
       "connector": "logs",
-      "measures": ["app_error_signal"],
+      "measures": [
+        "app_error_signal"
+      ],
       "cost_ms": 520,
       "load_class": "read_light",
-      "description": "checkout-service exception breakdown by class, 15:00–15:07"
+      "description": "checkout-service exception breakdown by class, 15:00\u201315:07"
     }
-  ]
+  ],
+  "customer_impact": {
+    "tier": "P0",
+    "affected_users": 12000,
+    "sla_breach": true,
+    "revenue_tagged_service": true,
+    "impact_source": "checkout POST /checkout \u2014 direct revenue path",
+    "_note_for_authors": "Real revenue-path incident: latency spike causes checkout abandonment. SLA is 99.9% availability + p95 < 1500ms; both breached."
+  }
 }

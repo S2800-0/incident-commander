@@ -1,0 +1,54 @@
+{
+  "_comment": "Spec-compliant OTLP metrics payload — a real checkout-service 5xx spike after a v6.10.0 deploy. Feed to /ingest/otlp/v1/metrics.",
+  "resourceMetrics": [
+    {
+      "resource": {
+        "attributes": [
+          {"key": "service.name",           "value": {"stringValue": "checkout-service"}},
+          {"key": "service.version",         "value": {"stringValue": "v6.10.0"}},
+          {"key": "deployment.environment",  "value": {"stringValue": "production"}},
+          {"key": "host.name",               "value": {"stringValue": "checkout-node-a1"}},
+          {"key": "telemetry.sdk.language",  "value": {"stringValue": "python"}}
+        ]
+      },
+      "scopeMetrics": [
+        {
+          "scope": {"name": "opentelemetry-instrumentation-http", "version": "0.48b0"},
+          "metrics": [
+            {
+              "name": "http.server.response.5xx.rate",
+              "unit": "req/s",
+              "description": "5xx response rate on checkout-service",
+              "gauge": {
+                "dataPoints": [
+                  {"timeUnixNano": "1762819500000000000", "asDouble": 2.1,  "attributes": [{"key": "http.route", "value": {"stringValue": "/checkout"}}]},
+                  {"timeUnixNano": "1762819560000000000", "asDouble": 3.4,  "attributes": [{"key": "http.route", "value": {"stringValue": "/checkout"}}]},
+                  {"timeUnixNano": "1762819620000000000", "asDouble": 41.7, "attributes": [{"key": "http.route", "value": {"stringValue": "/checkout"}}]},
+                  {"timeUnixNano": "1762819680000000000", "asDouble": 68.2, "attributes": [{"key": "http.route", "value": {"stringValue": "/checkout"}}]}
+                ]
+              }
+            },
+            {
+              "name": "http.server.request.duration",
+              "unit": "s",
+              "description": "server-side request duration",
+              "histogram": {
+                "aggregationTemporality": 2,
+                "dataPoints": [
+                  {
+                    "timeUnixNano":    "1762819680000000000",
+                    "count":           "1200",
+                    "sum":             920.4,
+                    "explicitBounds":  [0.01, 0.05, 0.1, 0.5, 1.0, 2.5],
+                    "bucketCounts":    ["8", "24", "80", "220", "540", "280", "48"],
+                    "attributes":      [{"key": "http.route", "value": {"stringValue": "/checkout"}}]
+                  }
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

@@ -40,9 +40,13 @@ def run_all(corpus_dir: str = "corpus") -> list[Run]:
         truth = b.ground_truth["root_cause_id"]
         rb_correct = bool(b.ground_truth.get("rollback_correct", False))
         for enabled in (True, False):
-            # use_llm=False always: the harness is the graded artifact and must be
-            # reproducible. A per-call auto-router would make Brier/accuracy a grab-bag.
-            res = run_investigation(b, probes_enabled=enabled, use_llm=False)
+            # use_llm=False AND policy_enabled=False AND dynamic_hypotheses=False
+            # always: the harness is the graded artifact and must be reproducible
+            # without a running Docker stack or a live LLM. Live-demo runs turn
+            # each of these on individually via env flags or explicit params.
+            res = run_investigation(b, probes_enabled=enabled,
+                                     use_llm=False, policy_enabled=False,
+                                     dynamic_hypotheses=False)
             v = res.verdict
             correct = v.root_cause_id == truth
             runs.append(Run(

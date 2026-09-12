@@ -1,0 +1,48 @@
+{
+  "_comment": "Spec-compliant OTLP logs payload — connection-pool exhaustion errors right after a deploy. Feed to /ingest/otlp/v1/logs.",
+  "resourceLogs": [
+    {
+      "resource": {
+        "attributes": [
+          {"key": "service.name",           "value": {"stringValue": "checkout-service"}},
+          {"key": "service.version",         "value": {"stringValue": "v6.10.0"}},
+          {"key": "deployment.environment",  "value": {"stringValue": "production"}}
+        ]
+      },
+      "scopeLogs": [
+        {
+          "scope": {"name": "checkout.db", "version": "1.0"},
+          "logRecords": [
+            {
+              "timeUnixNano":  "1762819620000000000",
+              "severityText":  "ERROR",
+              "severityNumber": 17,
+              "body":          {"stringValue": "connection pool exhausted for orders-db (active=50/50, waiters=12)"},
+              "attributes":    [
+                {"key": "exception.type", "value": {"stringValue": "PoolTimeoutError"}},
+                {"key": "db.system",       "value": {"stringValue": "postgresql"}}
+              ]
+            },
+            {
+              "timeUnixNano":  "1762819625000000000",
+              "severityText":  "ERROR",
+              "severityNumber": 17,
+              "body":          {"stringValue": "checkout POST /checkout failed: db.execute timeout after 3000ms"},
+              "attributes":    [
+                {"key": "http.route",         "value": {"stringValue": "/checkout"}},
+                {"key": "http.status_code",   "value": {"intValue": "500"}}
+              ]
+            },
+            {
+              "timeUnixNano":  "1762819635000000000",
+              "severityText":  "WARN",
+              "severityNumber": 13,
+              "body":          {"stringValue": "retry budget below threshold — backing off"},
+              "attributes":    []
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}
