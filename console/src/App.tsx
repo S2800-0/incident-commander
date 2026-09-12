@@ -14,6 +14,15 @@ type Stagnation = { best_observation: string | null; best_observation_eig: numbe
 type GatePending = { action: string; intervention_id?: string; description?: string; safety_envelope?: any; note?: string } | null;
 type InterventionResult = { intervention_id: string; summary: string; hash: string } | null;
 
+// Shipped-in-final-pivot event types — surfaced in the new panels.
+type PolicyDecisionEvt = { action: string; allow: boolean; reasons: string[]; engine_available: boolean; thresholds?: any; intervention_id?: string; description?: string; note?: string };
+type VerificationEvt = { intervention_id?: string; recovered: boolean; signal?: string; baseline_value?: number | null; post_intervention_value?: number | null; recovery_band?: any; reasoning?: string; source_uri?: string; synthesised?: boolean };
+type AutoRevertEvt = { intervention_id?: string; reason: string; safety_envelope?: any };
+type CustomerImpactEvt = { tier?: string | null; affected_users: number; sla_breach: boolean; revenue_tagged_service: boolean; impact_source: string; cis_score: number; components?: Record<string, number> };
+type DynamicMetaEvt = { count?: number; reasoning_summary?: string; mode?: string; reason?: string; note?: string };
+type DynamicHypEvt = { id: string; claim: string; confidence: number; natural_owner?: string; supporting_evidence: string[]; contradicting_evidence: string[]; discriminating_signals: string[] };
+type ActionBlockedEvt = { action: string; intervention_id?: string; reasons: string[]; engine_available: boolean; note?: string };
+
 const AGENT_LABEL: Record<string, string> = {
   change_agent: "Change",
   telemetry_agent: "Telemetry",
@@ -71,7 +80,8 @@ export default function App() {
   const [incidents, setIncidents] = useState<Incident[]>([]);
   const [sel, setSel] = useState<string>("INC-4471");
   const [probesOn, setProbesOn] = useState(true);
-  const [replay, setReplay] = useState(true);
+  const [replay, setReplay] = useState(false);          // live path by default, replays are backup
+  const [policyOn, setPolicyOn] = useState(true);       // NoOps mode — OPA gate, verification, CIS
   const [tab, setTab] = useState<"console" | "metrics">("console");
   const [running, setRunning] = useState(false);
 
@@ -93,6 +103,15 @@ export default function App() {
   const [interventionGate, setInterventionGate] = useState<GatePending>(null);
   const [interventionApproved, setInterventionApproved] = useState(false);
   const [interventionResult, setInterventionResult] = useState<InterventionResult>(null);
+  // ---- Newly-shipped state ----
+  const [policyDecisions, setPolicyDecisions] = useState<PolicyDecisionEvt[]>([]);
+  const [verification, setVerification] = useState<VerificationEvt | null>(null);
+  const [verifying, setVerifying] = useState<boolean>(false);
+  const [autoRevert, setAutoRevert] = useState<AutoRevertEvt | null>(null);
+  const [customerImpact, setCustomerImpact] = useState<CustomerImpactEvt | null>(null);
+  const [dynamicMeta, setDynamicMeta] = useState<DynamicMetaEvt | null>(null);
+  const [dynamicHyps, setDynamicHyps] = useState<Record<string, DynamicHypEvt>>({});
+  const [actionBlocked, setActionBlocked] = useState<ActionBlockedEvt | null>(null);
   const [panel, setPanel] = useState<PanelKind>(null);
   const [query, setQuery] = useState<string>("");
 
@@ -104,6 +123,27 @@ export default function App() {
   useEffect(() => {
     fetch("/incidents").then((r) => r.json()).then(setIncidents).catch(() => {});
   }, []);
+
+  // ---- URL-based auto-start (for headless screenshots) ----
+  // Usage: /?auto=INC-4478  (auto-clicks Investigate on load; skip replay)
+  // Optional: &policy=0 to turn OPA gate off, &probes=0 to run the OFF arm.
+  useEffect(() => {
+    if (!incidents.length) return;
+    const q = new URLSearchParams(window.location.search);
+    const auto = q.get("auto");
+    if (!auto) return;
+    if (!incidents.find((i) => i.incident_id === auto)) return;
+    setSel(auto);
+    if (q.get("policy") === "0") setPolicyOn(false);
+    if (q.get("probes") === "0") setProbesOn(false);
+    setReplay(false);
+    const t = setTimeout(() => {
+      // schedule after state settles so `sel` change flushes
+      const btn = document.querySelector<HTMLButtonElement>(".btnInvestigate");
+      btn?.click();
+    }, 300);
+    return () => clearTimeout(t);
+  }, [incidents]);
 
   const incident = incidents.find((i) => i.incident_id === sel);
   const filteredIncidents = useMemo(() => {
@@ -120,6 +160,9 @@ export default function App() {
     setLeaves([]); setSealed(null); setVerdict(null); setGate(null);
     setVoi(null); setStagnation(null); setInterventionWouldFire(null); setProvenance(null);
     setInterventionGate(null); setInterventionApproved(false); setInterventionResult(null);
+    setPolicyDecisions([]); setVerification(null); setVerifying(false);
+    setAutoRevert(null); setCustomerImpact(null); setDynamicMeta(null);
+    setDynamicHyps({}); setActionBlocked(null);
     gatePausedRef.current = false;
     queuedRef.current = [];
   }
@@ -212,6 +255,64 @@ export default function App() {
       case "chain_sealed":
         setSealed({ merkle_root: e.merkle_root, signature: e.signature, leaf_count: e.leaf_count });
         break;
+      // ---- Newly-shipped events ----
+      case "policy_decision":
+        setPolicyDecisions((prev) => [...prev, {
+          action: e.action, allow: e.allow, reasons: e.reasons || [],
+          engine_available: e.engine_available, thresholds: e.thresholds,
+          intervention_id: e.intervention_id, description: e.description, note: e.note,
+        }]);
+        break;
+      case "action_blocked":
+        setActionBlocked({
+          action: e.action, intervention_id: e.intervention_id,
+          reasons: e.reasons || [], engine_available: e.engine_available, note: e.note,
+        });
+        break;
+      case "verification_started":
+        setVerifying(true);
+        break;
+      case "verification_result":
+        setVerifying(false);
+        setVerification({
+          intervention_id: e.intervention_id, recovered: e.recovered, signal: e.signal,
+          baseline_value: e.baseline_value, post_intervention_value: e.post_intervention_value,
+          recovery_band: e.recovery_band, reasoning: e.reasoning,
+          source_uri: e.source_uri, synthesised: e.synthesised,
+        });
+        break;
+      case "auto_revert_triggered":
+        setAutoRevert({
+          intervention_id: e.intervention_id, reason: e.reason,
+          safety_envelope: e.safety_envelope,
+        });
+        break;
+      case "customer_impact_computed":
+        setCustomerImpact({
+          tier: e.tier, affected_users: e.affected_users, sla_breach: e.sla_breach,
+          revenue_tagged_service: e.revenue_tagged_service, impact_source: e.impact_source,
+          cis_score: e.cis_score, components: e.components,
+        });
+        break;
+      case "hypothesis_generated":
+        setDynamicHyps((prev) => ({ ...prev, [e.id]: {
+          id: e.id, claim: e.claim, confidence: e.confidence,
+          natural_owner: e.natural_owner,
+          supporting_evidence: e.supporting_evidence || [],
+          contradicting_evidence: e.contradicting_evidence || [],
+          discriminating_signals: e.discriminating_signals || [],
+        }}));
+        break;
+      case "dynamic_generation_started":
+        setDynamicMeta({ mode: "dynamic", note: "generating hypotheses from raw context…" });
+        break;
+      case "dynamic_generation_completed":
+        setDynamicMeta((prev) => ({ ...(prev || {}), mode: "dynamic",
+          count: e.count, reasoning_summary: e.reasoning_summary }));
+        break;
+      case "dynamic_generation_fallback":
+        setDynamicMeta({ mode: "fallback", reason: e.reason, note: e.note });
+        break;
       case "done":
         setRunning(false);
         break;
@@ -242,7 +343,9 @@ export default function App() {
     const proto = location.protocol === "https:" ? "wss" : "ws";
     const ws = new WebSocket(`${proto}://${location.host}/ws`);
     wsRef.current = ws;
-    ws.onopen = () => ws.send(JSON.stringify({ incident_id: sel, probes_enabled: probesOn, replay }));
+    const q = new URLSearchParams(window.location.search);
+    const speed = parseFloat(q.get("speed") || "1") || 1;
+    ws.onopen = () => ws.send(JSON.stringify({ incident_id: sel, probes_enabled: probesOn, replay, policy_enabled: policyOn, speed }));
     ws.onmessage = (m) => dispatch(JSON.parse(m.data));
     ws.onclose = () => setRunning(false);
   }
@@ -338,6 +441,7 @@ export default function App() {
                   ))}
                 </select>
                 <label className="chk"><input type="checkbox" checked={probesOn} onChange={(e) => setProbesOn(e.target.checked)} disabled={running} /> probes</label>
+                <label className="chk"><input type="checkbox" checked={policyOn} onChange={(e) => setPolicyOn(e.target.checked)} disabled={running} /> policy</label>
                 <label className="chk"><input type="checkbox" checked={replay} onChange={(e) => setReplay(e.target.checked)} disabled={running} /> replay</label>
                 <button className="btn primary btnInvestigate" onClick={start} disabled={running || !incident}>
                   <IconPlay />
@@ -485,6 +589,110 @@ export default function App() {
                           </div>
                         )}
                         {gate && <div className="gated">⛔ {gate.action} gated — awaiting explicit approval (never auto-fired)</div>}
+                      </div>
+                    )}
+                  </div>
+                </section>
+
+                {/* Customer Impact — CIS routing (Sep 16) */}
+                <section className="card cis">
+                  <h2>Customer Impact <span className="hbadge">CIS</span></h2>
+                  <div className="body">
+                    {!customerImpact && <div className="idle">no customer_impact block on this incident</div>}
+                    {customerImpact && (
+                      <div className="cisWrap">
+                        <div className={`cisScore urg-${customerImpact.cis_score >= 80 ? "critical" : customerImpact.cis_score >= 55 ? "high" : customerImpact.cis_score >= 30 ? "moderate" : "low"}`}>
+                          <div className="cisNum">{Math.round(customerImpact.cis_score)}</div>
+                          <div className="cisLbl">
+                            {customerImpact.cis_score >= 80 ? "CRITICAL" : customerImpact.cis_score >= 55 ? "HIGH" : customerImpact.cis_score >= 30 ? "MODERATE" : "LOW"}
+                          </div>
+                        </div>
+                        <div className="cisMeta">
+                          <div className="cisRow"><span>tier</span><b>{customerImpact.tier || "unspec"}</b></div>
+                          <div className="cisRow"><span>affected users</span><b>{customerImpact.affected_users.toLocaleString()}</b></div>
+                          <div className="cisRow"><span>SLA breach</span><b>{customerImpact.sla_breach ? "yes" : "no"}</b></div>
+                          <div className="cisRow"><span>revenue path</span><b>{customerImpact.revenue_tagged_service ? "yes" : "no"}</b></div>
+                          <div className="cisSource">{customerImpact.impact_source}</div>
+                          <div className="cisNote">
+                            Routing-only — CIS never touches the diagnostic path.
+                            <br/>Guardrail proven at build time (static AST audit).
+                          </div>
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                </section>
+
+                {/* Policy Decisions — OPA + Rego (Sep 12-13) */}
+                <section className="card policy">
+                  <h2>Policy Engine <span className="hbadge">OPA · Rego</span></h2>
+                  <div className="body">
+                    {!policyDecisions.length && <div className="idle">
+                      {policyOn ? "no state-changing action reached the gate yet" : "policy mode OFF — legacy gate flow"}
+                    </div>}
+                    {policyDecisions.map((pd, i) => (
+                      <div key={i} className={`policyRow ${pd.allow ? "allow" : "deny"}`}>
+                        <div className="policyHead">
+                          <span className={`pill ${pd.allow ? "pill-healthy" : "pill-critical"}`}>
+                            <span className="dot" style={{ background: pd.allow ? "var(--cisco-status-healthy)" : "var(--cisco-status-critical)" }} />
+                            {pd.allow ? "ALLOW" : "DENY"}
+                          </span>
+                          <span className="policyAction">{pd.action}</span>
+                          {!pd.engine_available && <span className="pill pill-warn">engine unreachable — fail-closed</span>}
+                        </div>
+                        {pd.description && <div className="policyDesc">{pd.description}</div>}
+                        {pd.reasons.length > 0 && (
+                          <div className="policyReasons">
+                            {pd.reasons.map((r, j) => (<span key={j} className="reasonPill">{r}</span>))}
+                          </div>
+                        )}
+                      </div>
+                    ))}
+                    {actionBlocked && (
+                      <div className="actionBlocked">
+                        ⛔ Action blocked: <b>{actionBlocked.action}</b>
+                        <div className="reasonList">
+                          {actionBlocked.reasons.map((r, i) => (<span key={i} className="reasonPill">{r}</span>))}
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                </section>
+
+                {/* Verification — post-intervention recovery check (Sep 15) */}
+                <section className="card verify">
+                  <h2>Verification Loop <span className="hbadge">recovery check</span></h2>
+                  <div className="body">
+                    {!verification && !verifying && <div className="idle">no intervention run yet</div>}
+                    {verifying && <div className="verifying">▸ verifying recovery signal…</div>}
+                    {verification && (
+                      <div className={`verifyResult ${verification.recovered ? "ok" : "fail"}`}>
+                        <div className="verifyHead">
+                          <span className={`pill ${verification.recovered ? "pill-healthy" : "pill-critical"}`}>
+                            <span className="dot" style={{ background: verification.recovered ? "var(--cisco-status-healthy)" : "var(--cisco-status-critical)" }} />
+                            {verification.recovered ? "RECOVERED" : "NOT RECOVERED"}
+                          </span>
+                          <span className="verifySignal">{verification.signal}</span>
+                        </div>
+                        <div className="verifyValues">
+                          <span>baseline <b>{verification.baseline_value ?? "n/a"}</b></span>
+                          <span>post <b>{verification.post_intervention_value ?? "n/a"}</b></span>
+                          <span>band ≤ <b>{verification.recovery_band?.max ?? "n/a"}</b></span>
+                        </div>
+                        {verification.reasoning && <div className="verifyWhy">{verification.reasoning}</div>}
+                        {verification.synthesised && <div className="verifyNote">synthesised from ground truth (no explicit block)</div>}
+                      </div>
+                    )}
+                    {autoRevert && (
+                      <div className="autoRevert">
+                        ↩ Auto-revert triggered: {autoRevert.reason}
+                        {autoRevert.safety_envelope && (
+                          <div className="envelope">
+                            envelope: {autoRevert.safety_envelope.max_traffic_pct}% traffic ·
+                            {autoRevert.safety_envelope.max_duration_s}s ·
+                            auto-revert {String(autoRevert.safety_envelope.auto_revert)}
+                          </div>
+                        )}
                       </div>
                     )}
                   </div>

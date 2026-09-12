@@ -35,6 +35,13 @@ PACE = {
     "ambiguity_detected": 1.3, "probe_selected": 1.1, "probe_result": 0.9,
     "posterior_updated": 0.5, "hypothesis_eliminated": 0.8, "exhausted": 0.8,
     "gate_pending": 0.7, "verdict": 0.6, "chain_sealed": 0.6,
+    # Newly-shipped events — deliberate beats so the console has time to render.
+    "policy_decision": 0.7, "action_blocked": 0.8,
+    "verification_started": 0.4, "verification_result": 0.9,
+    "auto_revert_triggered": 0.9,
+    "customer_impact_computed": 0.6,
+    "dynamic_generation_started": 0.3, "hypothesis_generated": 0.4,
+    "dynamic_generation_completed": 0.4, "dynamic_generation_fallback": 0.5,
 }
 
 
@@ -115,13 +122,20 @@ def investigate(body: dict):
             "probes_run": res.probes_run}
 
 
-def _events_for(incident_id: str, probes_enabled: bool, replay: bool) -> list[dict]:
+def _events_for(incident_id: str, probes_enabled: bool, replay: bool,
+                 policy_enabled: bool = False) -> list[dict]:
+    # Live path re-runs the orchestrator so newly-shipped events
+    # (policy_decision, verification_result, customer_impact_computed,
+    # hypothesis_generated, auto_revert_triggered) reach the console.
+    # Replay path returns pre-recorded events (used only when explicitly
+    # requested — kept as a demo-safety net).
     if replay:
         p = REPLAY_DIR / f"{incident_id}.json"
         if p.exists():
             return json.loads(p.read_text())
     b = load_bundle(CORPUS / f"{incident_id}.json")
-    return run_investigation(b, probes_enabled=probes_enabled).events
+    return run_investigation(b, probes_enabled=probes_enabled,
+                              policy_enabled=policy_enabled).events
 
 
 @app.websocket("/ws")
@@ -131,7 +145,8 @@ async def ws(sock: WebSocket):
         params = await sock.receive_json()
         events = _events_for(params["incident_id"],
                              params.get("probes_enabled", True),
-                             params.get("replay", False))
+                             params.get("replay", False),
+                             params.get("policy_enabled", False))
         speed = float(params.get("speed", 1.0))
         for e in events:
             await sock.send_json(e)
