@@ -277,10 +277,11 @@ input, select { font: inherit; }
 .grid {
   display: grid;
   grid-template-columns: 1.15fr 0.85fr;
-  grid-template-rows: auto auto auto auto auto;
+  grid-template-rows: auto auto auto auto auto auto;
   gap: 12px;
   grid-template-areas:
     "cis    policy"
+    "target target"
     "lanes  ticker"
     "board  verify"
     "board  chain"
@@ -294,6 +295,7 @@ input, select { font: inherit; }
 .cis    { grid-area: cis; }
 .policy { grid-area: policy; }
 .verify { grid-area: verify; }
+.target { grid-area: target; }
 
 /* Agent lanes */
 .laneRow { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 10px; }
@@ -737,10 +739,61 @@ input, select { font: inherit; }
   margin-top: 4px; font: 10px var(--font-mono, monospace); color: var(--cisco-text-muted);
 }
 
+/* Target Service — real HTTP execution against mock */
+.target .body { min-height: 90px; }
+.targetRow {
+  display: grid;
+  grid-template-columns: 1fr 30px 1fr;
+  gap: 10px;
+  align-items: stretch;
+}
+.targetSide {
+  padding: 10px 12px;
+  border: 1px solid var(--cisco-border-light);
+  border-radius: 5px;
+  background: var(--cisco-border-subtle);
+}
+.targetSide.was { background: #FDECEC; border-color: #F86C6C; opacity: 0.85; }
+.targetSide.now { background: #EAF7EE; border-color: #62DE80; }
+.targetSide.cur { background: #FDECEC; border-color: #F86C6C; }
+.targetArrow { display: flex; align-items: center; justify-content: center; font: 700 24px var(--font-sans); color: var(--cisco-blue-primary); }
+.targetLbl {
+  font: 700 10px var(--font-sans);
+  letter-spacing: 0.5px;
+  color: var(--cisco-text-muted);
+  text-transform: uppercase;
+  margin-bottom: 6px;
+}
+.targetVer {
+  font: 700 18px var(--font-mono, monospace);
+  color: var(--cisco-text-primary);
+  margin-bottom: 8px;
+}
+.targetMetric {
+  display: flex; justify-content: space-between;
+  font: 12px var(--font-mono, monospace);
+  padding: 3px 0;
+}
+.targetMetric .mLbl { color: var(--cisco-text-muted); }
+.targetMetric b { color: var(--cisco-text-primary); font-weight: 600; }
+.targetMetric b.hot  { color: var(--cisco-status-critical); }
+.targetMetric b.cool { color: var(--cisco-status-healthy); }
+.targetReason { margin-top: 6px; font: 10px var(--font-sans); color: var(--cisco-text-secondary); font-style: italic; }
+.execLine {
+  margin-top: 10px; padding: 6px 10px; border-radius: 3px;
+  font: 500 11px var(--font-mono, monospace);
+}
+.execLine.started  { background: #E0F2FE; color: var(--cisco-blue-primary); }
+.execLine.executed { background: #EAF7EE; color: #1A7A3B; border-left: 3px solid var(--cisco-status-healthy); }
+.execLine.failed   { background: #FDECEC; color: var(--cisco-status-critical); border-left: 3px solid var(--cisco-status-critical); }
+.execNote { margin-top: 3px; font: 10px var(--font-sans); color: var(--cisco-text-muted); font-style: italic; }
+
 /* Responsive */
 @media (max-width: 1100px) {
-  .grid { grid-template-columns: 1fr; grid-template-areas: "cis" "policy" "lanes" "ticker" "board" "verify" "voi" "chain"; }
+  .grid { grid-template-columns: 1fr; grid-template-areas: "cis" "policy" "target" "lanes" "ticker" "board" "verify" "voi" "chain"; }
   .cisWrap { grid-template-columns: 1fr; }
+  .targetRow { grid-template-columns: 1fr; }
+  .targetArrow { transform: rotate(90deg); }
   .kpiRow { grid-template-columns: repeat(2, 1fr); }
   .charts { grid-template-columns: 1fr; }
   .controls select { min-width: 100%; }

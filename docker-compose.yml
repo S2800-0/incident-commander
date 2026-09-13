@@ -85,5 +85,24 @@ services:
   #       condition: service_healthy
   #   restart: unless-stopped
 
+  # -------------------------------------------------------------------------
+  # shop-svc — the target checkout-service that Incident Commander acts on.
+  # Small FastAPI mock exposing GET /shop/health and POST /shop/rollback.
+  # Runs on host uvicorn by default (see mock/shop_svc.py header) — this
+  # compose entry lets you run it inside Docker instead when convenient.
+  # -------------------------------------------------------------------------
+  # shop-svc:
+  #   image: python:3.12-slim
+  #   container_name: ic-shop-svc
+  #   working_dir: /app
+  #   command: >
+  #     sh -c "pip install --quiet fastapi uvicorn pydantic &&
+  #            uvicorn mock.shop_svc:app --host 0.0.0.0 --port 9001 --log-level warning"
+  #   ports:
+  #     - "9001:9001"
+  #   volumes:
+  #     - .:/app:ro
+  #   restart: unless-stopped
+
 volumes:
   nifi_data:

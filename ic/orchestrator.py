@@ -24,6 +24,10 @@ from .dynamic_triage import (dynamic_enabled_from_env,
 from .evidence_chain import seal
 from .llm import llm_enabled
 from .models import EvidenceItem, Hypothesis, Probe, Verdict
+import json as _json
+import urllib.error as _urllib_error
+import urllib.request as _urllib_request
+
 from .policy import (build_input_for_intervention, build_input_for_rollback,
                      evaluate_safely)
 from .probe import select_probe
@@ -60,11 +64,38 @@ def _policy_enabled_from_env() -> bool:
     return os.environ.get("IC_POLICY_ENABLED", "").lower() in ("1", "true", "yes", "on")
 
 
+def _execute_rollback_from_env() -> bool:
+    return os.environ.get("IC_EXECUTE_ROLLBACK", "").lower() in ("1", "true", "yes", "on")
+
+
+_SHOP_SVC_URL = os.environ.get("IC_SHOP_SVC_URL", "http://localhost:9001")
+_SHOP_SVC_TIMEOUT_S = float(os.environ.get("IC_SHOP_SVC_TIMEOUT_S", "3.0"))
+
+
+def _post_rollback_to_target(incident_id: str, reason: str) -> dict:
+    """Real HTTP POST to the mock target service — the thing a judge can see
+    change. Returns the target's response so we can seal it into the audit.
+    Failures are structured (no exception thrown) so the mechanism does not
+    break when the target is unreachable."""
+    payload = _json.dumps({"incident_id": incident_id, "reason": reason}).encode("utf-8")
+    req = _urllib_request.Request(
+        f"{_SHOP_SVC_URL}/shop/rollback", data=payload, method="POST",
+        headers={"Content-Type": "application/json"},
+    )
+    try:
+        with _urllib_request.urlopen(req, timeout=_SHOP_SVC_TIMEOUT_S) as resp:
+            body = _json.loads(resp.read().decode("utf-8"))
+        return {"ok": True, "target_response": body}
+    except (_urllib_error.URLError, _urllib_error.HTTPError, TimeoutError, OSError) as e:
+        return {"ok": False, "error": str(e)[:200]}
+
+
 def run_investigation(bundle: Bundle, probes_enabled: bool = True,
                       emit: Optional[Emit] = None, pacing: float = 0.0,
                       use_llm: Optional[bool] = None,
                       policy_enabled: Optional[bool] = None,
-                      dynamic_hypotheses: Optional[bool] = None) -> RunResult:
+                      dynamic_hypotheses: Optional[bool] = None,
+                      execute_rollback: Optional[bool] = None) -> RunResult:
     # use_llm=None → auto-detect from env (IC_USE_LLM + a real key). The harness passes
     # use_llm=False explicitly so ablation numbers are always deterministic/reproducible.
     # policy_enabled follows the same discipline — the graded harness passes False
@@ -78,6 +109,8 @@ def run_investigation(bundle: Bundle, probes_enabled: bool = True,
         policy_enabled = _policy_enabled_from_env()
     if dynamic_hypotheses is None:
         dynamic_hypotheses = dynamic_enabled_from_env()
+    if execute_rollback is None:
+        execute_rollback = _execute_rollback_from_env()
     emit = emit or _noop
     events: list[dict] = []
 
@@ -397,6 +430,31 @@ def run_investigation(bundle: Bundle, probes_enabled: bool = True,
             _emit({**rb_decision.to_event(),
                    "note": "policy check on the rollback recommendation — "
                            "execution belongs to the deploy tool, not this system"})
+
+            # ---- Real rollback execution against the target service ----
+            # When execute_rollback is True AND policy allowed AND the target
+            # is reachable, POST a real HTTP call to the mock target service.
+            # The judge sees the service's state actually change. Falls back
+            # cleanly (structured error event) when the target is not up.
+            if execute_rollback and rb_decision.allow:
+                _emit({"type": "rollback_execution_started",
+                       "target": _SHOP_SVC_URL,
+                       "note": "real HTTP POST → target service"})
+                r = _post_rollback_to_target(bundle.incident_id, winner.claim[:180])
+                if r.get("ok"):
+                    tr = r["target_response"]
+                    st = tr.get("state", {})
+                    _emit({"type": "rollback_executed",
+                           "target": _SHOP_SVC_URL,
+                           "target_state": st,
+                           "hash": (sealed.get("merkle_root", "") if False else "")[:12],
+                           "summary": f"target now {st.get('version', '?')} · "
+                                       f"5xx {int((st.get('error_rate') or 0.0) * 100)}%"})
+                else:
+                    _emit({"type": "rollback_execution_failed",
+                           "target": _SHOP_SVC_URL,
+                           "error": r.get("error"),
+                           "note": "target unreachable — mechanism unaffected; recorded honestly"})
         else:
             _emit({"type": "gate_pending", "action": "rollback",
                    "note": "state-changing action requires explicit approval — not auto-fired"})

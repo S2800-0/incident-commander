@@ -46,7 +46,8 @@ def run_all(corpus_dir: str = "corpus") -> list[Run]:
             # each of these on individually via env flags or explicit params.
             res = run_investigation(b, probes_enabled=enabled,
                                      use_llm=False, policy_enabled=False,
-                                     dynamic_hypotheses=False)
+                                     dynamic_hypotheses=False,
+                                     execute_rollback=False)
             v = res.verdict
             correct = v.root_cause_id == truth
             runs.append(Run(

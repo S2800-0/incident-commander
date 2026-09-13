@@ -22,6 +22,9 @@ type CustomerImpactEvt = { tier?: string | null; affected_users: number; sla_bre
 type DynamicMetaEvt = { count?: number; reasoning_summary?: string; mode?: string; reason?: string; note?: string };
 type DynamicHypEvt = { id: string; claim: string; confidence: number; natural_owner?: string; supporting_evidence: string[]; contradicting_evidence: string[]; discriminating_signals: string[] };
 type ActionBlockedEvt = { action: string; intervention_id?: string; reasons: string[]; engine_available: boolean; note?: string };
+// Real rollback execution against the mock target service.
+type TargetServiceState = { version: string; error_rate: number; p95_ms: number; since: number; reason: string };
+type RollbackExecEvt = { target: string; target_state?: TargetServiceState; summary?: string; error?: string; note?: string; kind: "started" | "executed" | "failed" };
 
 const AGENT_LABEL: Record<string, string> = {
   change_agent: "Change",
@@ -112,6 +115,11 @@ export default function App() {
   const [dynamicMeta, setDynamicMeta] = useState<DynamicMetaEvt | null>(null);
   const [dynamicHyps, setDynamicHyps] = useState<Record<string, DynamicHypEvt>>({});
   const [actionBlocked, setActionBlocked] = useState<ActionBlockedEvt | null>(null);
+  // Target-service (real HTTP execution) — pre-rollback state + rollback events.
+  const [executeRollback, setExecuteRollback] = useState<boolean>(true);
+  const [targetPre, setTargetPre] = useState<TargetServiceState | null>(null);
+  const [targetPost, setTargetPost] = useState<TargetServiceState | null>(null);
+  const [rollbackExec, setRollbackExec] = useState<RollbackExecEvt | null>(null);
   const [panel, setPanel] = useState<PanelKind>(null);
   const [query, setQuery] = useState<string>("");
 
@@ -136,6 +144,7 @@ export default function App() {
     setSel(auto);
     if (q.get("policy") === "0") setPolicyOn(false);
     if (q.get("probes") === "0") setProbesOn(false);
+    if (q.get("execute") === "0") setExecuteRollback(false);
     setReplay(false);
     const t = setTimeout(() => {
       // schedule after state settles so `sel` change flushes
@@ -163,6 +172,7 @@ export default function App() {
     setPolicyDecisions([]); setVerification(null); setVerifying(false);
     setAutoRevert(null); setCustomerImpact(null); setDynamicMeta(null);
     setDynamicHyps({}); setActionBlocked(null);
+    setTargetPre(null); setTargetPost(null); setRollbackExec(null);
     gatePausedRef.current = false;
     queuedRef.current = [];
   }
@@ -313,6 +323,17 @@ export default function App() {
       case "dynamic_generation_fallback":
         setDynamicMeta({ mode: "fallback", reason: e.reason, note: e.note });
         break;
+      // ---- Real rollback execution (Sep 22) — target service reacts ----
+      case "rollback_execution_started":
+        setRollbackExec({ kind: "started", target: e.target, note: e.note });
+        break;
+      case "rollback_executed":
+        setRollbackExec({ kind: "executed", target: e.target, target_state: e.target_state, summary: e.summary });
+        setTargetPost(e.target_state);
+        break;
+      case "rollback_execution_failed":
+        setRollbackExec({ kind: "failed", target: e.target, error: e.error, note: e.note });
+        break;
       case "done":
         setRunning(false);
         break;
@@ -340,12 +361,21 @@ export default function App() {
     reset();
     setRunning(true);
     startRef.current = performance.now();
+    // Prime the target-service panel with the "before" snapshot. Uses the
+    // vite proxy on same origin.
+    fetch("/api/shop/health").then((r) => (r.ok ? r.json() : null)).then((s) => s && setTargetPre(s)).catch(() => {});
     const proto = location.protocol === "https:" ? "wss" : "ws";
     const ws = new WebSocket(`${proto}://${location.host}/ws`);
     wsRef.current = ws;
     const q = new URLSearchParams(window.location.search);
     const speed = parseFloat(q.get("speed") || "1") || 1;
-    ws.onopen = () => ws.send(JSON.stringify({ incident_id: sel, probes_enabled: probesOn, replay, policy_enabled: policyOn, speed }));
+    ws.onopen = () => ws.send(JSON.stringify({
+      incident_id: sel,
+      probes_enabled: probesOn, replay,
+      policy_enabled: policyOn,
+      execute_rollback: executeRollback,
+      speed,
+    }));
     ws.onmessage = (m) => dispatch(JSON.parse(m.data));
     ws.onclose = () => setRunning(false);
   }
@@ -442,6 +472,7 @@ export default function App() {
                 </select>
                 <label className="chk"><input type="checkbox" checked={probesOn} onChange={(e) => setProbesOn(e.target.checked)} disabled={running} /> probes</label>
                 <label className="chk"><input type="checkbox" checked={policyOn} onChange={(e) => setPolicyOn(e.target.checked)} disabled={running} /> policy</label>
+                <label className="chk"><input type="checkbox" checked={executeRollback} onChange={(e) => setExecuteRollback(e.target.checked)} disabled={running} /> execute</label>
                 <label className="chk"><input type="checkbox" checked={replay} onChange={(e) => setReplay(e.target.checked)} disabled={running} /> replay</label>
                 <button className="btn primary btnInvestigate" onClick={start} disabled={running || !incident}>
                   <IconPlay />
@@ -693,6 +724,73 @@ export default function App() {
                             auto-revert {String(autoRevert.safety_envelope.auto_revert)}
                           </div>
                         )}
+                      </div>
+                    )}
+                  </div>
+                </section>
+
+                {/* Target Service — real HTTP execution against mock (Sep 22) */}
+                <section className="card target">
+                  <h2>Target Service <span className="hbadge">execution</span></h2>
+                  <div className="body">
+                    {!targetPre && !rollbackExec && (
+                      <div className="idle">
+                        target service not reachable — start `mock/shop_svc.py` on :9000 to see it react
+                      </div>
+                    )}
+                    {targetPre && (
+                      <div className="targetRow">
+                        <div className={`targetSide ${targetPost ? "was" : "cur"}`}>
+                          <div className="targetLbl">{targetPost ? "before" : "current state"}</div>
+                          <div className="targetVer">{targetPre.version}</div>
+                          <div className="targetMetric">
+                            <span className="mLbl">5xx</span>
+                            <b className={(targetPre.error_rate > 0.1) ? "hot" : ""}>
+                              {(targetPre.error_rate * 100).toFixed(1)}%
+                            </b>
+                          </div>
+                          <div className="targetMetric">
+                            <span className="mLbl">p95</span>
+                            <b className={(targetPre.p95_ms > 1000) ? "hot" : ""}>
+                              {targetPre.p95_ms} ms
+                            </b>
+                          </div>
+                          <div className="targetReason">{targetPre.reason}</div>
+                        </div>
+                        {targetPost && (
+                          <>
+                            <div className="targetArrow">→</div>
+                            <div className="targetSide now">
+                              <div className="targetLbl">after rollback</div>
+                              <div className="targetVer">{targetPost.version}</div>
+                              <div className="targetMetric">
+                                <span className="mLbl">5xx</span>
+                                <b className={(targetPost.error_rate > 0.1) ? "hot" : "cool"}>
+                                  {(targetPost.error_rate * 100).toFixed(1)}%
+                                </b>
+                              </div>
+                              <div className="targetMetric">
+                                <span className="mLbl">p95</span>
+                                <b className={(targetPost.p95_ms > 1000) ? "hot" : "cool"}>
+                                  {targetPost.p95_ms} ms
+                                </b>
+                              </div>
+                              <div className="targetReason">{targetPost.reason}</div>
+                            </div>
+                          </>
+                        )}
+                      </div>
+                    )}
+                    {rollbackExec?.kind === "started" && (
+                      <div className="execLine started">▸ real HTTP POST → {rollbackExec.target}/shop/rollback</div>
+                    )}
+                    {rollbackExec?.kind === "executed" && (
+                      <div className="execLine executed">✓ rollback executed against {rollbackExec.target}</div>
+                    )}
+                    {rollbackExec?.kind === "failed" && (
+                      <div className="execLine failed">
+                        ⛔ target unreachable — {rollbackExec.error}
+                        <div className="execNote">mechanism unaffected — recorded honestly in the audit trail</div>
                       </div>
                     )}
                   </div>

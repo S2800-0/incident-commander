@@ -42,6 +42,9 @@ PACE = {
     "customer_impact_computed": 0.6,
     "dynamic_generation_started": 0.3, "hypothesis_generated": 0.4,
     "dynamic_generation_completed": 0.4, "dynamic_generation_fallback": 0.5,
+    # Real rollback execution against the target service.
+    "rollback_execution_started": 0.7, "rollback_executed": 1.2,
+    "rollback_execution_failed": 0.9,
 }
 
 
@@ -123,19 +126,21 @@ def investigate(body: dict):
 
 
 def _events_for(incident_id: str, probes_enabled: bool, replay: bool,
-                 policy_enabled: bool = False) -> list[dict]:
+                 policy_enabled: bool = False,
+                 execute_rollback: bool = False) -> list[dict]:
     # Live path re-runs the orchestrator so newly-shipped events
     # (policy_decision, verification_result, customer_impact_computed,
-    # hypothesis_generated, auto_revert_triggered) reach the console.
-    # Replay path returns pre-recorded events (used only when explicitly
-    # requested — kept as a demo-safety net).
+    # hypothesis_generated, auto_revert_triggered, rollback_executed)
+    # reach the console. Replay path returns pre-recorded events (kept as a
+    # demo-safety net).
     if replay:
         p = REPLAY_DIR / f"{incident_id}.json"
         if p.exists():
             return json.loads(p.read_text())
     b = load_bundle(CORPUS / f"{incident_id}.json")
     return run_investigation(b, probes_enabled=probes_enabled,
-                              policy_enabled=policy_enabled).events
+                              policy_enabled=policy_enabled,
+                              execute_rollback=execute_rollback).events
 
 
 @app.websocket("/ws")
@@ -146,7 +151,8 @@ async def ws(sock: WebSocket):
         events = _events_for(params["incident_id"],
                              params.get("probes_enabled", True),
                              params.get("replay", False),
-                             params.get("policy_enabled", False))
+                             params.get("policy_enabled", False),
+                             params.get("execute_rollback", False))
         speed = float(params.get("speed", 1.0))
         for e in events:
             await sock.send_json(e)

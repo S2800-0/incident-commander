@@ -11,6 +11,9 @@ export default defineConfig({
       "/harness": "http://localhost:8000",
       "/investigate": "http://localhost:8000",
       "/ws": { target: "ws://localhost:8000", ws: true },
+      // Target service mock — see mock/shop_svc.py. Rewrites /api/shop/*
+      // → :9000/shop/* so the console can fetch state without CORS.
+      "/api/shop": { target: "http://localhost:9001", rewrite: (p) => p.replace(/^\/api/, "") },
     },
   },
 });
