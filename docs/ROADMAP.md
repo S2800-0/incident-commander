@@ -1,7 +1,7 @@
 # Incident Commander — Production Maturity Roadmap
 
 **Version:** 1.0 (Final-Phase Pivot)
-**Companion to:** [`SRS.md`](SRS.md), [`RAI.md`](RAI.md), [`ROI.md`](ROI.md)
+**Companion to:** [`SRS.md`](SRS.md), [`RAI.md`](RAI.md), [`ROI.md`](ROI.md), [`SUSTAINABILITY.md`](SUSTAINABILITY.md)
 **Audience:** judge panel, engineering leadership, RAI reviewer
 
 ---

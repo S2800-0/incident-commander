@@ -13,6 +13,10 @@ ship?", this doc walks them through it in order.
     ladder (L0–L4).
   * [`docs/ROI.md`](../docs/ROI.md) — the business case, formula, and refreshed
     numbers from the 12-bundle corpus.
+  * [`docs/SUSTAINABILITY.md`](../docs/SUSTAINABILITY.md) — how the shipped
+    mechanisms carry sustainability properties as side-effects (probe waste,
+    pipeline waste, degraded-state minutes). Answers the "sustainability in
+    the agentic AI era" hackathon framing.
   * `demo/DEMO_SCRIPT.md` and `demo/QA_PREP.md` — LOCAL ONLY (gitignored per
     prior instruction). Kept on this machine as rehearsal aids.
 

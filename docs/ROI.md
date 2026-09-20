@@ -2,7 +2,7 @@
 
 **Version:** 1.0 (Sep 20 — refreshed on wider corpus)
 **Status:** Model DONE (implemented as `ic/roi.py`); INPUT assumptions still labeled as placeholders.
-**Companion to:** [`SRS.md`](SRS.md) FR-6.1–6.3, [`ROADMAP.md`](ROADMAP.md).
+**Companion to:** [`SRS.md`](SRS.md) FR-6.1–6.3, [`ROADMAP.md`](ROADMAP.md), [`SUSTAINABILITY.md`](SUSTAINABILITY.md).
 
 ---
 
