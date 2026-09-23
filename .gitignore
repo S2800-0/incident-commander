@@ -40,3 +40,6 @@ demo/.Rhistory
 demo/Incident_Commander_Template.pptx
 demo/*.pptx.bak
 demo/*.pre-*.bak
+
+# Trial results and generated postmortems — reproduce with `python -m ic.live_trials`
+results/

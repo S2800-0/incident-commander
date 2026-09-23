@@ -375,6 +375,47 @@ panels stay in idle state.
 
 ---
 
+## Feature 14 — 63 live trials (the deck's numbers, now real)
+
+**What it is.** `ic/live_trials.py` runs 63 real end-to-end trials against
+the pipeline, grouped into five outcome categories:
+
+| Category | Trials | Outcome | Autonomy |
+|---|---|---|---|
+| Confirmed → acted → verified recovered | 25 | 25 / 25 ✓ | autonomous |
+| Won by exclusion → verification caught → reverted | 10 | 10 / 10 ✓ | autonomous |
+| Reversible non-rollback action proposed | 9 | 9 / 9 ✓ | autonomous |
+| Evidence insufficient → abstained | 5 | 5 / 5 ✓ | escalated |
+| Irreversible action proposed → policy denied | 14 | 14 / 14 ✓ | escalated |
+| **Total** | **63** | | **44 autonomous / 19 escalated** |
+
+**Try it.**
+
+```bash
+python -m ic.live_trials --out results/live_trials.json
+```
+
+Prints the outcome table above and writes `results/live_trials.json` (per-trial
+rows + comparison table). Runs in under a second.
+
+**LIVE-0073 postmortem — sealed and verified offline.**
+
+```bash
+python -m ic.investigate INC-4478 -o results/LIVE-0073.postmortem.json
+python verify.py results/LIVE-0073.postmortem.json    # VERIFIED ✅
+```
+
+Real Merkle root + Ed25519 signature over 7 evidence leaves. Third-party
+verifiable without server access.
+
+**Tests.** `pytest tests/test_live_trials.py` — 5/5 covering total, split,
+each category's expected outcome.
+
+**Screenshots.** `demo/screenshots/live_trials/01_63_trials_outcomes.png`,
+`02_live_0073_verified.png`, `03_tests_green.png`.
+
+---
+
 ## Feature 13 — Live SLO breach detector (the trigger side of the loop)
 
 **What it is.** `ic/slo_detector.py` polls a target service's health
