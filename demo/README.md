@@ -375,6 +375,60 @@ panels stay in idle state.
 
 ---
 
+## Feature 13 — Live SLO breach detector (the trigger side of the loop)
+
+**What it is.** `ic/slo_detector.py` polls a target service's health
+endpoint and evaluates each sample against an SLO (`error_rate < 5%`,
+`p95 < 500ms`). On **3 consecutive breach evaluations** it POSTs to
+`/investigate`; on **3 consecutive healthy evaluations** it re-arms.
+This is the "how does an investigation start" piece — before this, a
+bundle had to be intake'd manually.
+
+**Why hysteresis.** Standard Google SRE / CloudWatch pattern. A single
+flap under threshold resets the counter, so noise doesn't page. A flap
+back over threshold during recovery returns to `FIRED` without
+double-firing the investigation.
+
+**Try it.**
+
+```bash
+# terminal 1 — the target service
+docker compose up -d shop-svc
+# or: uvicorn mock.shop_svc:app --port 9001
+
+# terminal 2 — the detector
+python -m ic.slo_detector \
+    --target http://localhost:9001/shop/health \
+    --investigate http://localhost:8000/investigate \
+    --incident INC-4478 --breach-n 3 --rearm-n 3 --interval 2
+```
+
+You'll see:
+
+```
+[slo] ! state=  breach counter=1 error_rate=68.00% p95=1850ms
+[slo] ! state=  breach counter=2 error_rate=68.00% p95=1850ms
+[slo] * state=   fired counter=0 error_rate=68.00% p95=1850ms
+[slo] >>> FIRED investigation INC-4478 — error_rate=68.00% > 5% OR p95=1850ms > 500ms, 3 consecutive evaluations
+```
+
+After the orchestrator's rollback lands on shop-svc:
+
+```
+[slo] ~ state= healthy counter=1 error_rate=2.00% p95=210ms
+[slo] ~ state= healthy counter=2 error_rate=2.00% p95=210ms
+[slo] . state=watching counter=0 error_rate=2.00% p95=210ms
+```
+
+**Tests.** `pytest tests/test_slo_detector.py` — 6/6 covering healthy-only,
+single flap, three-breach fire, three-healthy re-arm, flap-during-recovery,
+and re-fire after full recovery.
+
+**Screenshots.** `demo/screenshots/slo/01_slo_breach_fires.png`,
+`02_slo_recovery_rearm.png`, `03_slo_tests_green.png`.
+
+---
+
 ## Where to look next
 
   * **For a specific requirement** — start at [`docs/SRS.md`](../docs/SRS.md)
