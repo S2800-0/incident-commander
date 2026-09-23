@@ -6,12 +6,14 @@ from __future__ import annotations
 
 import argparse
 
+from . import enable_utf8_stdout
 from .bundle import load_bundle
 from .evidence_chain import write_postmortem
 from .orchestrator import run_investigation
 
 
 def main() -> None:
+    enable_utf8_stdout()
     ap = argparse.ArgumentParser()
     ap.add_argument("incident_id")
     ap.add_argument("--no-probes", action="store_true", help="ablation-off arm")

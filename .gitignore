@@ -23,6 +23,10 @@ postmortem*.json
 replays/
 keys/
 *.log
+
+# live mode — local binaries and per-run outputs
+tools/
+live_runs/
 .DS_Store
 
 # internal demo prep — never commit (personal narration / rehearsal notes)

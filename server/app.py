@@ -10,9 +10,11 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
+from contextlib import asynccontextmanager
 from pathlib import Path
 
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
@@ -21,12 +23,32 @@ from ic.harness import main as run_harness
 from ic.orchestrator import run_investigation
 from ic.otlp import (OtlpLogsPayload, OtlpMetricsPayload, logs_to_evidence,
                      metrics_to_evidence)
+from ic.live.controller import RESULTS_DIR as LIVE_RESULTS_DIR
+from ic.live.controller import LiveController
+from ic.live.telemetry import TelemetryStore
+from ic.policy import OPA_URL, build_input_for_intervention, evaluate_safely
 
 ROOT = Path(__file__).resolve().parent.parent
 CORPUS = ROOT / "corpus"
 REPLAY_DIR = ROOT / "replays"
 
-app = FastAPI(title="Incident Commander")
+# --- live mode ---------------------------------------------------------------
+# The controller runs on its own thread from startup. It stays idle until OTLP
+# telemetry arrives and an SLO breaches, so replay-only use is unaffected.
+# IC_LIVE=0 disables it entirely.
+live_store = TelemetryStore()
+live = LiveController(live_store)
+
+
+@asynccontextmanager
+async def lifespan(_app: FastAPI):
+    if os.environ.get("IC_LIVE", "1") != "0":
+        live.start()
+    yield
+    live.stop()
+
+
+app = FastAPI(title="Incident Commander", lifespan=lifespan)
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
 # Deliberate pacing (seconds) per event type — the probe beat is the theatre.
@@ -56,6 +78,30 @@ def incidents():
                     "alert": b.alert, "ground_truth": b.ground_truth,
                     "has_replay": (REPLAY_DIR / f"{b.incident_id}.json").exists()})
     return out
+
+
+@app.get("/policy/health")
+def policy_health():
+    """Is the OPA sidecar actually reachable?
+
+    The console defaults its `policy` toggle to this. Why it matters: with the
+    toggle on and OPA down, `evaluate_safely` fails closed (correctly) and the
+    intervention is blocked — so a demo machine without `docker compose up opa`
+    shows a *safe but wrong* verdict (H1 @ 57% instead of H2 @ 94% on INC-4478).
+    Detecting the engine beats hardcoding either default: policy-gated when the
+    stack is up, plain human-gated when it isn't.
+    """
+    probe = build_input_for_intervention(
+        incident_id="INC-HEALTHCHECK",
+        posterior=0.6,
+        evidence_refs=["healthcheck://opa"],
+        safety_envelope={"max_traffic_pct": 5, "max_duration_s": 60, "auto_revert": True},
+        observation_stagnated=True,
+    )
+    decision = evaluate_safely(probe)
+    return {"available": decision.engine_available,
+            "url": OPA_URL,
+            "detail": "" if decision.engine_available else "; ".join(decision.reasons)}
 
 
 @app.get("/harness")
@@ -93,6 +139,7 @@ def _remember(items: list) -> None:
 
 @app.post("/ingest/otlp/v1/metrics")
 def ingest_otlp_metrics(payload: OtlpMetricsPayload) -> dict:
+    live_store.ingest(payload)  # live mode reads telemetry from here
     items = metrics_to_evidence(payload)
     _remember(items)
     return {"accepted": len(items),
@@ -172,3 +219,44 @@ def record_replays() -> None:
 
 if __name__ == "__main__":
     record_replays()
+
+
+# ---------------------------------------------------------------------------
+# LIVE MODE — read-only views of what the autonomous controller is doing.
+# There is deliberately no endpoint to start an investigation, run a probe or
+# approve an action: incidents open from telemetry and OPA decides actions.
+# ---------------------------------------------------------------------------
+
+@app.get("/live/state")
+def live_state() -> dict:
+    return live.snapshot()
+
+
+@app.get("/live/events")
+def live_events(since: int = 0, limit: int = 500) -> dict:
+    events = live.events_since(since, min(limit, 2000))
+    return {"events": events, "last_seq": events[-1]["seq"] if events else since}
+
+
+@app.get("/live/incidents")
+def live_incidents() -> list[dict]:
+    return live.incidents
+
+
+@app.get("/live/incidents/{incident_id}/postmortem")
+def live_postmortem(incident_id: str) -> JSONResponse:
+    path = LIVE_RESULTS_DIR / f"{incident_id}.postmortem.json"
+    if not path.exists():
+        raise HTTPException(404, "no sealed postmortem for that incident")
+    return JSONResponse(json.loads(path.read_text()))
+
+
+@app.post("/live/mode")
+def live_mode(body: dict) -> dict:
+    """Selects the investigation policy used for the NEXT incident — a
+    measurement switch for baselines, not a way to steer an investigation."""
+    try:
+        live.set_mode(body.get("mode", ""))
+    except ValueError as e:
+        raise HTTPException(422, str(e))
+    return {"mode": live.mode}

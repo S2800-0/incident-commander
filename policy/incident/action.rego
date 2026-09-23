@@ -154,6 +154,157 @@ reasons contains "auto_revert_not_enforced" if {
 }
 
 # ============================================================================
+# LIVE MODE — autonomous actions against the running target service.
+#
+# The live controller (ic/live/controller.py) acts WITHOUT a human in the
+# normal path, so this block is the entire permission model for autonomy.
+# The agent proposes an action; it cannot grant itself one.
+#
+# Design rule: the condition for autonomy is REVERSIBILITY, not confidence.
+#   * Reversible, service-scoped actions may execute on their own.
+#   * An action concluded only by excluding alternatives (no positive
+#     signature evidence) is still allowed IF it is reversible AND an
+#     auto-revert AND a fresh-telemetry verification are planned — the
+#     verification step is what catches a wrong-but-defensible diagnosis.
+#   * Irreversible or shared-infrastructure actions are forbidden outright.
+#
+# Extra input fields (live only):
+#   mode                 : "live"
+#   reversible           : bool
+#   blast_radius         : "service" | "shared_dependency" | "platform"
+#   confirmation         : "positive" | "exclusion_only" | "none"
+#   verification_planned : bool
+#   reverts_agent_action : bool   (auto_revert only)
+# ============================================================================
+posterior_threshold_remediation := 0.75
+max_canary_probe_traffic_pct    := 25
+max_canary_probe_duration_s     := 30
+
+live_actions := {"rollback_deploy", "canary_probe", "enable_inventory_fallback", "auto_revert"}
+
+# Never autonomous, whatever the confidence: irreversible, or blast radius
+# beyond the incident's own service.
+forbidden_actions := {
+    "failover_database", "restart_database", "drop_database",
+    "delete_namespace", "scale_to_zero", "flush_shared_cache",
+}
+
+is_live_action if input.action in live_actions
+is_forbidden_action if input.action in forbidden_actions
+
+confirmation_sufficient if input.confirmation == "positive"
+confirmation_sufficient if {
+    input.confirmation == "exclusion_only"
+    input.safety_envelope.auto_revert == true
+    input.verification_planned == true
+}
+
+# Roll back the most recent deploy of the incident's own service.
+allow if {
+    input.action == "rollback_deploy"
+    input.reversible == true
+    input.blast_radius == "service"
+    input.posterior >= posterior_threshold_remediation
+    input.deploy_recent == true
+    input.upstream_outage == false
+    count(input.evidence_refs) > 0
+    confirmation_sufficient
+}
+
+# Serve cached inventory instead of calling a degraded dependency. Reversible
+# and service-scoped, but it changes customer-visible data freshness, so it
+# requires positive evidence rather than exclusion.
+allow if {
+    input.action == "enable_inventory_fallback"
+    input.reversible == true
+    input.blast_radius == "service"
+    input.posterior >= posterior_threshold_remediation
+    input.confirmation == "positive"
+    count(input.evidence_refs) > 0
+}
+
+# Interventional probe: route a bounded slice of traffic to the previous
+# version to measure a cohort difference. The service enforces the expiry.
+allow if {
+    input.action == "canary_probe"
+    input.safety_envelope.max_traffic_pct <= max_canary_probe_traffic_pct
+    input.safety_envelope.max_duration_s <= max_canary_probe_duration_s
+    input.safety_envelope.auto_revert == true
+    count(input.evidence_refs) > 0
+}
+
+# Undo an action this agent executed in this incident, after verification
+# failed. Restoring the pre-action state is always permitted.
+allow if {
+    input.action == "auto_revert"
+    input.reverts_agent_action == true
+    count(input.evidence_refs) > 0
+}
+
+reasons contains "action_forbidden_by_policy" if is_forbidden_action
+
+reasons contains "action_not_reversible" if {
+    input.mode == "live"
+    input.reversible == false
+}
+
+reasons contains "unknown_action_class" if {
+    input.mode == "live"
+    not is_live_action
+    not is_forbidden_action
+}
+
+reasons contains "blast_radius_exceeds_autonomy_limit" if {
+    input.mode == "live"
+    input.blast_radius != "service"
+}
+
+reasons contains "posterior_below_remediation_threshold" if {
+    input.action in {"rollback_deploy", "enable_inventory_fallback"}
+    input.posterior < posterior_threshold_remediation
+}
+
+reasons contains "deploy_not_recent" if {
+    input.action == "rollback_deploy"
+    input.deploy_recent == false
+}
+
+reasons contains "upstream_outage_detected" if {
+    input.action == "rollback_deploy"
+    input.upstream_outage == true
+}
+
+reasons contains "insufficient_confirmation" if {
+    input.action == "rollback_deploy"
+    not confirmation_sufficient
+}
+
+reasons contains "positive_confirmation_required" if {
+    input.action == "enable_inventory_fallback"
+    input.confirmation != "positive"
+}
+
+reasons contains "envelope_traffic_too_wide" if {
+    input.action == "canary_probe"
+    input.safety_envelope.max_traffic_pct > max_canary_probe_traffic_pct
+}
+
+reasons contains "envelope_duration_too_long" if {
+    input.action == "canary_probe"
+    input.safety_envelope.max_duration_s > max_canary_probe_duration_s
+}
+
+reasons contains "auto_revert_not_enforced" if {
+    input.action == "canary_probe"
+    input.safety_envelope.auto_revert != true
+}
+
+reasons contains "revert_target_not_agent_action" if {
+    input.action == "auto_revert"
+    input.reverts_agent_action != true
+}
+
+# ============================================================================
 # Composite decision — one object the caller can log verbatim into the
 # evidence chain as the policy-decision leaf.
 # ============================================================================
@@ -169,5 +320,8 @@ decision := {
         "max_canary_duration_s": max_canary_duration_s,
         "max_intervention_traffic_pct": max_intervention_traffic_pct,
         "max_intervention_duration_s": max_intervention_duration_s,
+        "posterior_threshold_remediation": posterior_threshold_remediation,
+        "max_canary_probe_traffic_pct": max_canary_probe_traffic_pct,
+        "max_canary_probe_duration_s": max_canary_probe_duration_s,
     },
 }

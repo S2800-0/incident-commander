@@ -35,7 +35,63 @@ intervention *would* have been chosen if it were executable.
 
 ---
 
-## Quickstart
+## Two modes
+
+| | **Replay mode** | **Live mode** |
+|---|---|---|
+| Input | 12 authored incident bundles | a running service's real OTLP telemetry |
+| Incident starts | you pick a bundle | an SLO breach, detected automatically |
+| Hypotheses | seeded in the bundle | generated from observed context (deploy log, dependencies) |
+| Probe selection | divergence ÷ cost heuristic | Bayesian beliefs + Shannon expected information gain (nats) |
+| Evidence | pre-authored probe results | live telemetry queries and a real, policy-gated traffic split |
+| Actions | recommended; human gate | executed autonomously when OPA allows; denied otherwise |
+| Verification | fixture / ground truth | fresh telemetry after the action; auto-revert on failure |
+| Purpose | deterministic ablation (the proof) | the system operating end to end |
+
+Replay mode is unchanged by live mode and still reproduces the numbers below exactly.
+
+## Live mode
+
+```bash
+pip install -e .                            # + OPA 1.4 binary at tools/opa(.exe), on PATH, or docker compose up -d opa
+python -m demo.live_stack                   # OPA :8181, IC :8000, checkout-service :9001, 60 rps load, console :5173
+# open http://127.0.0.1:5173 → Live tab, wait ~45 s for a clean baseline, then break something:
+curl -X POST http://127.0.0.1:9001/chaos/scenario/bad_deploy
+```
+
+What happens next involves no clicks: the detector opens an incident from the 5xx
+breach; hypotheses are generated; probes are chosen by expected information gain per
+second; OPA decides every state-changing action (an interventional canary, the
+remediation, any revert) and each decision is sealed into the incident's evidence chain;
+the remediation runs against the service; recovery is judged only from telemetry
+collected after the action; a failed remediation is reverted automatically.
+
+Four environment scenarios exercise each branch of the autonomy model:
+
+| scenario (`/chaos/scenario/…`) | what is really broken | designed outcome |
+|---|---|---|
+| `bad_deploy` | code defect in the new release | canary confirms → rollback **ALLOW** → verified **RESOLVED** |
+| `config_regression_hidden_dependency` | uninstrumented payment-gateway; the config release is a coincidence | rollback allowed by exclusion → verification **fails** → **auto-revert** → escalate |
+| `correlated_dependency_degradation` | both dependencies degrade together | evidence cannot separate causes → **abstain** → escalate, no action |
+| `database_saturation` | orders-db saturation | diagnosis confirmed → DB failover **DENY** (irreversible) → escalate |
+
+Measure it (ground truth lives only in the runner, never in Incident Commander):
+
+```bash
+python -m demo.live_experiment --reps eig=5,exhaustive=3,no_probes=3
+python -m ic.roi --live live_runs/experiment_latest.json
+tools/opa.exe test policy/ -v                # policy unit tests
+python -m pytest tests -q                    # live engine unit tests
+```
+
+Live mode's honest limits: the target is a simulated service on one host (every request,
+metric, decision and action is real, but the fault shapes and 60 rps load are synthetic);
+the hypothesis space is template-generated from four failure shapes, so a cause outside it
+is caught only by verification; and the latency thresholds are tuned to this service.
+
+---
+
+## Quickstart (replay mode)
 
 ```bash
 pip install -e .                 # pydantic, cryptography, fastapi, uvicorn

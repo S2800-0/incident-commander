@@ -11,10 +11,12 @@ beyond `cryptography`. Prints VERIFIED or TAMPERED and exits non-zero on tamper.
 import json
 import sys
 
+from ic import enable_utf8_stdout
 from ic.evidence_chain import verify_postmortem
 
 
 def main(argv: list[str]) -> int:
+    enable_utf8_stdout()
     if len(argv) != 2:
         print("usage: python verify.py <postmortem.json>", file=sys.stderr)
         return 2

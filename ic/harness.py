@@ -10,6 +10,7 @@ import json
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
+from . import enable_utf8_stdout
 from .bundle import load_corpus
 from .orchestrator import run_investigation
 
@@ -168,6 +169,7 @@ def _sustainability(on: list[Run], off: list[Run]) -> dict:
 
 
 def main(corpus_dir: str = "corpus", out: str = "harness_results.json") -> dict:
+    enable_utf8_stdout()
     runs = run_all(corpus_dir)
     summary = summarize(runs)
     doc = {"runs": [asdict(r) for r in runs], "summary": summary}

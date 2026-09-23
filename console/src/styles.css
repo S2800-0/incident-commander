@@ -269,6 +269,9 @@ input, select { font: inherit; }
 .controls select:focus { outline: none; border-color: var(--cisco-blue-primary); }
 .chk { display: inline-flex; align-items: center; gap: 5px; color: var(--cisco-text-secondary); font-size: 12px; }
 .chk input { accent-color: var(--cisco-blue-primary); }
+/* Shown only when the OPA probe came back unreachable — explains why the
+   policy gate defaulted off (see the /policy/health effect in App.tsx). */
+.chkHint { color: var(--cisco-status-major); font-size: 11px; font-weight: 600; }
 .truth { margin-left: auto; color: var(--cisco-text-secondary); font-size: 11px; }
 .truth b { color: var(--cisco-status-major); font-weight: 700; }
 
@@ -800,3 +803,117 @@ input, select { font: inherit; }
   .laneRow { grid-template-columns: 1fr; }
   .voiRow { grid-template-columns: 150px 1fr 80px; }
 }
+
+/* ==================== Live mode ==================== */
+/* Everything here reports what the autonomous controller did; nothing drives it. */
+
+.lv { display: flex; flex-direction: column; gap: 12px; }
+.lv-spacer { flex: 1; }
+.lv-muted { color: var(--cisco-text-muted); font-size: 11px; }
+.lv-link { background: none; border: 0; padding: 0; color: var(--cisco-text-link); font: inherit; cursor: pointer; }
+.lv button:focus-visible { outline: 2px solid var(--cisco-blue-primary); outline-offset: 2px; }
+.lv-error { background: rgba(231,76,60,0.08); color: var(--cisco-status-critical); border: 1px solid rgba(231,76,60,0.3);
+  border-radius: 4px; padding: 8px 12px; font-weight: 600; }
+
+.lv-strip {
+  display: flex; flex-wrap: wrap; align-items: center; gap: 6px 18px;
+  background: var(--cisco-card-bg); border: 1px solid var(--cisco-border-light); border-radius: var(--card-radius);
+  padding: 10px 14px;
+}
+.lv-live { display: inline-flex; align-items: center; gap: 6px; font: 800 11px/1 var(--font-sans); letter-spacing: 1px; color: var(--cisco-status-critical); }
+.lv-pulse { width: 8px; height: 8px; border-radius: 50%; background: var(--cisco-status-critical); animation: lvPulse 1.6s ease-in-out infinite; }
+@keyframes lvPulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.25; } }
+.lv-kv { font-size: 12px; color: var(--cisco-text-secondary); }
+.lv-kv b { color: var(--cisco-text-primary); margin-right: 4px; font-weight: 700; }
+.lv-kv.bad, .lv-kv.bad b { color: var(--cisco-status-critical); }
+.lv-metric { display: inline-flex; flex-direction: column; align-items: flex-end; min-width: 64px;
+  font: 700 16px/1.1 var(--font-mono); font-variant-numeric: tabular-nums; }
+.lv-metric small { font: 700 9px/1 var(--font-sans); letter-spacing: 0.6px; color: var(--cisco-text-muted); margin-bottom: 3px; }
+.lv-metric.bad { color: var(--cisco-status-critical); }
+
+.lv-empty h3 { margin: 0 0 6px; font-size: 15px; }
+.lv-empty p { margin: 0; color: var(--cisco-text-secondary); max-width: 70ch; }
+
+.lv-headRow { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; }
+.lv-id { font: 700 18px/1 var(--font-mono); }
+.lv-cond { color: var(--cisco-text-secondary); font-size: 12px; }
+.lv-now { margin-top: 12px; padding: 8px 10px; background: var(--cisco-app-bg); border-radius: 3px; font-size: 12px; }
+
+.lv-steps { list-style: none; display: flex; flex-wrap: wrap; gap: 4px; margin: 14px 0 0; padding: 0; }
+.lv-steps li { display: inline-flex; align-items: center; gap: 6px; padding: 4px 10px 4px 8px; border-radius: 3px;
+  font: 700 10px/1.4 var(--font-sans); letter-spacing: 0.4px; text-transform: uppercase;
+  background: var(--cisco-border-subtle); color: var(--cisco-text-muted); }
+.lv-stepDot { width: 7px; height: 7px; border-radius: 50%; background: currentColor; }
+.lv-steps li.done { background: rgba(39,174,96,0.10); color: var(--cisco-status-healthy); }
+.lv-steps li.active { background: rgba(52,152,219,0.12); color: var(--cisco-status-info); }
+.lv-steps li.active .lv-stepDot { animation: lvPulse 1.2s ease-in-out infinite; }
+.lv-steps li.fail { background: rgba(230,126,34,0.12); color: var(--cisco-status-major); }
+.lv-steps li.skip { text-decoration: line-through; opacity: 0.6; }
+@media (prefers-reduced-motion: reduce) { .lv-pulse, .lv-steps li.active .lv-stepDot { animation: none; } }
+
+.lv-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
+@media (max-width: 1100px) { .lv-grid { grid-template-columns: 1fr; } }
+
+.lv-hyp { padding: 10px 0; border-bottom: 1px solid var(--cisco-border-subtle); }
+.lv-hyp:last-of-type { border-bottom: 0; }
+.lv-hyp.out { opacity: 0.5; }
+.lv-hypTop { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.lv-hypId { font: 700 12px var(--font-mono); }
+.lv-hyp.lead .lv-hypId { color: var(--cisco-blue-primary); }
+.lv-p { font: 700 14px var(--font-mono); font-variant-numeric: tabular-nums; }
+.lv-bar { height: 6px; background: var(--cisco-border-subtle); border-radius: 3px; margin: 6px 0; overflow: hidden; }
+.lv-bar span { display: block; height: 100%; background: var(--cisco-blue-primary); transition: width 0.4s ease; }
+.lv-hyp.out .lv-bar span { background: var(--cisco-text-muted); }
+.lv-claim { font-size: 12px; }
+.lv-preds { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 5px; }
+.lv-pred { font: 11px var(--font-mono); padding: 1px 6px; border-radius: 3px; background: var(--cisco-app-bg); color: var(--cisco-text-secondary); }
+.lv-pred.signature { background: rgba(4,159,217,0.10); color: #006A96; }
+.lv-entropy { margin-top: 10px; font-size: 12px; color: var(--cisco-text-secondary); }
+
+.lv-table { width: 100%; border-collapse: collapse; font-size: 12px; }
+.lv-table th { text-align: left; font: 700 10px var(--font-sans); letter-spacing: 0.4px; text-transform: uppercase;
+  color: var(--cisco-text-muted); padding: 4px 6px; border-bottom: 1px solid var(--cisco-border-light); white-space: nowrap; }
+.lv-table td { padding: 6px; border-bottom: 1px solid var(--cisco-border-subtle); font-variant-numeric: tabular-nums; vertical-align: top; }
+.lv-table tr.sel td { background: rgba(4,159,217,0.07); }
+.lv-table tr.na td { color: var(--cisco-text-muted); }
+.lv-scroll { overflow-x: auto; }
+.lv-scroll .lv-table tbody tr { cursor: pointer; }
+.lv-inl { margin-left: 6px; }
+
+.lv-probe { margin-top: 10px; padding: 8px 10px; border: 1px solid var(--cisco-border-subtle); border-radius: 3px; }
+.lv-probeTop { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; font-size: 12px; }
+.lv-why { font-size: 11px; color: var(--cisco-text-secondary); margin-top: 3px; }
+.lv-stat { display: flex; flex-wrap: wrap; gap: 4px 14px; font-size: 12px; margin-top: 4px; font-variant-numeric: tabular-nums; }
+
+.lv-verdict { margin-top: 12px; padding: 8px 10px; border-radius: 3px; font-size: 12px; }
+.lv-verdict.ok { background: rgba(39,174,96,0.08); color: #1E8449; }
+.lv-verdict.warn { background: rgba(230,126,34,0.10); color: #AF601A; }
+.lv-verdict.bad { background: rgba(231,76,60,0.08); color: var(--cisco-status-critical); }
+
+.lv-pol { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding: 8px 0; border-bottom: 1px solid var(--cisco-border-subtle); font-size: 12px; }
+.lv-pol:last-child { border-bottom: 0; }
+.lv-reasons { flex-basis: 100%; font: 11px var(--font-mono); color: var(--cisco-status-critical); }
+
+.lv-rem { font-size: 12px; }
+.lv-change { display: flex; align-items: center; gap: 10px; margin-top: 10px; font: 700 15px var(--font-mono); }
+.lv-arrow { color: var(--cisco-blue-primary); }
+.lv-verify { margin-top: 10px; padding: 10px; border-radius: 3px; }
+.lv-verify.ok { background: rgba(39,174,96,0.08); }
+.lv-verify.bad { background: rgba(231,76,60,0.08); }
+.lv-verifyHead { font: 800 13px var(--font-sans); letter-spacing: 0.5px; }
+.lv-verify.ok .lv-verifyHead { color: var(--cisco-status-healthy); }
+.lv-verify.bad .lv-verifyHead { color: var(--cisco-status-critical); }
+.lv-revert { margin-top: 10px; padding: 10px; border-radius: 3px; background: rgba(230,126,34,0.10); font-size: 12px; }
+
+.lv-outcome .body { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 16px; }
+.lv-esc { font-size: 12px; color: var(--cisco-text-secondary); }
+
+.lv-timeline { max-height: 320px; overflow-y: auto; font: 12px/1.6 var(--font-mono); }
+.lv-line { display: grid; grid-template-columns: 64px 1fr; gap: 8px; padding: 1px 0; }
+.lv-t { color: var(--cisco-text-muted); text-align: right; font-variant-numeric: tabular-nums; }
+.lv-line.t-policy_decision, .lv-line.t-remediation_executed, .lv-line.t-verification_result,
+.lv-line.t-auto_revert_executed, .lv-line.t-incident_closed, .lv-line.t-diagnosis, .lv-line.t-abstained { font-weight: 700; }
+
+.lv-env h2 { text-transform: none; letter-spacing: 0; }
+.lv-env .body p { margin: 0 0 10px; max-width: 80ch; }
+.lv-envRow { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 8px; }

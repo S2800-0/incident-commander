@@ -321,6 +321,194 @@ def _to_dict(report: Report) -> dict:
     }
 
 
+# =============================================================================
+# LIVE MODE ROI — from repeated live fault-injection runs (demo/live_experiment.py)
+# =============================================================================
+#
+# Three layers, never mixed:
+#   MEASURED — counted from the live experiment file, per investigation mode
+#   ASSUMED  — organisation-specific inputs (CLI), none measured by us
+#   DERIVED  — MEASURED × ASSUMED, each formula printed next to its value
+#
+# The live experiment's scenario mix is designed (one of each failure shape per
+# repetition), so any rate over "all trials" describes the test mix, not a
+# production incident distribution. The model therefore only uses rates
+# conditioned on scenario type, and takes the production mix as an input.
+
+DEFAULT_LIVE_MANUAL_MINUTES = 30.0      # assumed on-call time to diagnose+mitigate a bad release by hand
+DEFAULT_LIVE_ENGINEERS = 2              # assumed engineers engaged per incident
+DEFAULT_LIVE_REVERSIBLE_SHARE = 0.25    # assumed share of incidents that are reversible release regressions
+DEFAULT_LIVE_WRONG_ACTION_COST = DEFAULT_ROLLBACK_COST_USD
+
+
+def _rate(n: float, d: float) -> Optional[float]:
+    return (n / d) if d else None
+
+
+def compute_live(path: str, incidents_per_month: int, engineer_hourly_usd: float,
+                 manual_minutes: float, engineers: int, reversible_share: float,
+                 wrong_action_cost_usd: float) -> dict:
+    doc = json.loads(Path(path).read_text())
+    trials = doc["trials"]
+    modes = sorted({t["mode"] for t in trials})
+
+    measured: dict = {"source": str(path), "modes": {}}
+    for m in modes:
+        mt = [t for t in trials if t["mode"] == m]
+        recs = [t["incident"] for t in mt if t["incident"]]
+        bad = [t for t in mt if t["scenario"] == "bad_deploy"]
+        bad_resolved = sum(1 for t in bad if t["incident"] and t["incident"]["status"] == "RESOLVED")
+        unfixable = [t for t in mt if t["scenario"] != "bad_deploy"]
+        harmful = sum(1 for t in mt if t["incident"] and (
+            t["score"]["forbidden_action_executed"] or t["score"]["unreverted_change_left"]))
+        wrong = sum(1 for t in mt if t["incident"] and t["score"]["wrong_remediation_executed"])
+        wrong_or_harmful = sum(1 for t in mt if t["incident"] and (
+            t["score"]["wrong_remediation_executed"] or t["score"]["forbidden_action_executed"]
+            or t["score"]["unreverted_change_left"]))
+        resolved_recs = [t["incident"] for t in bad if t["incident"] and t["incident"]["status"] == "RESOLVED"]
+        measured["modes"][m] = {
+            "trials": len(mt),
+            "detected": len(recs),
+            "good_outcome_rate": _rate(sum(t["score"]["good_outcome"] for t in mt), len(mt)),
+            "reversible_release_trials": len(bad),
+            "autonomous_resolution_rate_on_reversible": _rate(bad_resolved, len(bad)),
+            "unfixable_trials": len(unfixable),
+            "escalated_without_harm_rate_on_unfixable": _rate(
+                sum(1 for t in unfixable if t["incident"] and t["incident"]["status"].startswith("ESCALATED")
+                    and not t["score"]["forbidden_action_executed"] and not t["score"]["unreverted_change_left"]),
+                len(unfixable)),
+            "harmful_outcomes": harmful,
+            "harmful_outcome_rate": _rate(harmful, len(recs)),
+            "wrong_remediations_executed": wrong,
+            "incidents_with_wrong_or_harmful_action": wrong_or_harmful,
+            "wrong_or_harmful_action_rate": _rate(wrong_or_harmful, len(recs)),
+            "wrong_remediations_caught_and_reverted": sum(
+                1 for t in mt if t["incident"] and t["score"]["wrong_remediation_executed"]
+                and (t["incident"].get("auto_revert") or {}).get("executed")),
+            "policy_denies": sum(r.get("policy_denies") or 0 for r in recs),
+            "mean_detection_latency_s": _mean_or_none([t["detection_latency_s"] for t in mt]),
+            "mean_time_to_verified_recovery_s": _mean_or_none(
+                [r.get("time_to_verified_recovery_s") for r in resolved_recs]),
+            "mean_investigation_s": _mean_or_none([r.get("investigation_duration_s") for r in recs]),
+            "mean_probes_per_incident": _mean_or_none([r.get("probes_run") for r in recs]),
+            "mean_wasted_probes_per_incident": _mean_or_none([r.get("probes_wasted") for r in recs]),
+            "mean_canary_exposure_pct_s": _mean_or_none([r.get("canary_exposure_pct_s") for r in recs]),
+            # counted only until the agent CLOSES the incident — an escalation closes
+            # early while the outage continues, so this is NOT customer impact avoided
+            "mean_failed_requests_until_agent_closed": _mean_or_none(
+                [(r.get("customer_impact") or {}).get("failed_requests") for r in recs]),
+            "chains_verified": sum(1 for r in recs if (r.get("chain") or {}).get("verified")),
+        }
+
+    assumed = {
+        "incidents_per_month": incidents_per_month,
+        "engineer_hourly_usd": engineer_hourly_usd,
+        "manual_minutes_to_mitigate_reversible_regression": manual_minutes,
+        "engineers_engaged_per_incident": engineers,
+        "reversible_release_share_of_incidents": reversible_share,
+        "cost_per_harmful_or_wrong_action_usd": wrong_action_cost_usd,
+    }
+
+    derived: dict = {}
+    eig = measured["modes"].get("eig")
+    if eig:
+        auto = eig["autonomous_resolution_rate_on_reversible"] or 0.0
+        automated = incidents_per_month * reversible_share * auto
+        t_rec_min = (eig["mean_time_to_verified_recovery_s"] or 0.0) / 60.0
+        saved_min_each = max(0.0, manual_minutes - t_rec_min)
+        hours = automated * saved_min_each / 60.0 * engineers
+        derived["incidents_resolved_without_a_human_per_month"] = {
+            "value": round(automated, 2),
+            "formula": "incidents_per_month × reversible_share × measured autonomous_resolution_rate"}
+        derived["time_to_recovery_saved_per_automated_incident_min"] = {
+            "value": round(saved_min_each, 2),
+            "formula": "assumed manual_minutes − measured mean_time_to_verified_recovery"}
+        derived["engineer_hours_avoided_per_month"] = {
+            "value": round(hours, 2),
+            "formula": "automated incidents × minutes saved / 60 × engineers_engaged"}
+        derived["engineer_cost_avoided_per_month_usd"] = {
+            "value": round(hours * engineer_hourly_usd, 2),
+            "formula": "engineer_hours_avoided × engineer_hourly_usd"}
+
+        base = measured["modes"].get("no_probes")
+        if base and base["wrong_or_harmful_action_rate"] is not None and eig["wrong_or_harmful_action_rate"] is not None:
+            base_bad = base["wrong_or_harmful_action_rate"]
+            eig_bad = eig["wrong_or_harmful_action_rate"]
+            derived["wrong_or_harmful_actions_avoided_vs_no_investigation_per_month"] = {
+                "value": round(incidents_per_month * max(0.0, base_bad - eig_bad), 2),
+                "formula": "incidents_per_month × (measured no_probes rate − measured eig rate) of wrong/harmful actions "
+                           "— applies the TEST-MIX rate; production mix will differ"}
+            derived["wrong_action_cost_avoided_per_month_usd"] = {
+                "value": round(incidents_per_month * max(0.0, base_bad - eig_bad) * wrong_action_cost_usd, 2),
+                "formula": "above × cost_per_harmful_or_wrong_action_usd"}
+
+        exh = measured["modes"].get("exhaustive")
+        if exh and exh["mean_probes_per_incident"] and eig["mean_probes_per_incident"] is not None:
+            derived["probes_avoided_vs_exhaustive_per_incident"] = {
+                "value": round(exh["mean_probes_per_incident"] - eig["mean_probes_per_incident"], 2),
+                "formula": "measured exhaustive mean probes − measured eig mean probes"}
+            derived["canary_traffic_exposure_avoided_vs_exhaustive_pct_s"] = {
+                "value": round((exh["mean_canary_exposure_pct_s"] or 0) - (eig["mean_canary_exposure_pct_s"] or 0), 1),
+                "formula": "measured exhaustive − measured eig mean (% of traffic × seconds sent to a canary)"}
+
+    caveats = [
+        "Target is a simulated service on one machine: latency, fault shapes and traffic (60 rps) are synthetic, "
+        "though every request, metric, policy decision and action in the runs was real.",
+        "Scenario mix is designed (equal counts per failure shape) — rates over all trials describe the test mix, "
+        "not production; the model uses per-scenario-type rates and takes the production mix as an ASSUMED input.",
+        "manual_minutes is assumed, not measured against human responders on these scenarios.",
+        "Small n: see trials per mode. Treat rates as indicative, not as confidence-bounded estimates.",
+        "Only 4 failure shapes and a template hypothesis space; causes outside it are only caught by verification.",
+        "mean_failed_requests_until_agent_closed stops counting when the agent closes the incident. An escalation "
+        "closes in milliseconds while the fault continues, so a mode that gives up fastest scores lowest — do not "
+        "read it as customer impact avoided.",
+        "The no_probes baseline executes nothing because OPA denies every naive action; its zero wrong actions are "
+        "the policy's doing. Compare modes on resolution rate, not on wrong-action counts alone.",
+    ]
+    return {"kind": "live", "generated_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
+            "measured": measured, "assumed": assumed, "derived": derived, "caveats": caveats}
+
+
+def _mean_or_none(xs):
+    xs = [x for x in xs if x is not None]
+    return round(statistics.mean(xs), 2) if xs else None
+
+
+def _render_live(r: dict) -> str:
+    W = 78
+    L = ["=" * W, "INCIDENT COMMANDER — LIVE-MODE ROI", "=" * W, f"generated: {r['generated_at']}", ""]
+    L.append(f"MEASURED (live runs: {r['measured']['source']}):")
+    modes = r["measured"]["modes"]
+    keys = [k for k in next(iter(modes.values())).keys()] if modes else []
+    L.append(f"  {'metric':52s}" + "".join(f"{m:>12s}" for m in modes))
+    for k in keys:
+        row = []
+        for m in modes:
+            v = modes[m][k]
+            if isinstance(v, float) and ("rate" in k):
+                row.append(f"{v:>12.0%}")
+            elif v is None:
+                row.append(f"{'—':>12s}")
+            else:
+                row.append(f"{v:>12}")
+        L.append(f"  {k:52s}" + "".join(row))
+    L.append("")
+    L.append("ASSUMED (replace with your organisation's numbers):")
+    for k, v in r["assumed"].items():
+        L.append(f"  {k:52s}{v}")
+    L.append("")
+    L.append("DERIVED (MEASURED × ASSUMED):")
+    for k, v in r["derived"].items():
+        L.append(f"  {k}: {v['value']}")
+        L.append(f"      = {v['formula']}")
+    L.append("")
+    L.append("CAVEATS:")
+    for c in r["caveats"]:
+        L.append(f"  • {c}")
+    L.append("=" * W)
+    return "\n".join(L)
+
+
 def main(argv: Optional[list[str]] = None) -> int:
     p = argparse.ArgumentParser(
         description="Compute ROI for Incident Commander from real harness output.",
@@ -328,6 +516,15 @@ def main(argv: Optional[list[str]] = None) -> int:
                "with real org numbers before presenting the total as anything but "
                "illustrative.",
     )
+    p.add_argument("--live", type=str, default=None, metavar="EXPERIMENT_JSON",
+                   help="compute live-mode ROI from a demo/live_experiment.py output file "
+                        "(e.g. live_runs/experiment_latest.json) instead of the replay harness")
+    p.add_argument("--manual-minutes", type=float, default=DEFAULT_LIVE_MANUAL_MINUTES,
+                   help="[live] assumed manual minutes to diagnose and mitigate a bad release")
+    p.add_argument("--engineers", type=int, default=DEFAULT_LIVE_ENGINEERS,
+                   help="[live] assumed engineers engaged per incident")
+    p.add_argument("--reversible-share", type=float, default=DEFAULT_LIVE_REVERSIBLE_SHARE,
+                   help="[live] assumed share of incidents that are reversible release regressions")
     p.add_argument("--incidents", type=int, default=DEFAULT_INCIDENTS_PER_MONTH,
                    metavar="N", help=f"incidents per month (default: {DEFAULT_INCIDENTS_PER_MONTH})")
     p.add_argument("--hard-slice-pct", type=float, default=None, metavar="FRAC",
@@ -344,6 +541,14 @@ def main(argv: Optional[list[str]] = None) -> int:
     p.add_argument("--out", type=str, default=None, metavar="PATH",
                    help="also write the JSON to this path")
     args = p.parse_args(argv)
+
+    if args.live:
+        live_report = compute_live(args.live, args.incidents, args.engineer_hourly, args.manual_minutes,
+                                   args.engineers, args.reversible_share, args.rollback_cost)
+        if args.out:
+            Path(args.out).write_text(json.dumps(live_report, indent=2))
+        print(json.dumps(live_report, indent=2) if args.json else _render_live(live_report))
+        return 0
 
     report = compute(
         incidents_per_month=args.incidents,

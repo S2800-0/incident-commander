@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { AGENTS, EvidenceLeaf, Hypothesis, ICEvent, Incident } from "./types";
 import MetricsPanel from "./MetricsPanel";
+import LivePanel from "./LivePanel";
 
 type LaneLine = { t: number; text: string; kind: string; hyp?: string };
 type Ambiguity = { margin: number; tau: number; reason?: string; resolvable: boolean; note?: string } | null;
@@ -85,7 +86,11 @@ export default function App() {
   const [probesOn, setProbesOn] = useState(true);
   const [replay, setReplay] = useState(false);          // live path by default, replays are backup
   const [policyOn, setPolicyOn] = useState(true);       // NoOps mode — OPA gate, verification, CIS
-  const [tab, setTab] = useState<"console" | "metrics">("console");
+  // null = still probing. Drives the default of `policyOn`: see the effect below.
+  const [opaUp, setOpaUp] = useState<boolean | null>(null);
+  // Live mode is the default view; `?auto=` (the replay screenshot renderer) keeps the replay console.
+  const [tab, setTab] = useState<"live" | "console" | "metrics">(
+    () => (new URLSearchParams(window.location.search).get("auto") ? "console" : "live"));
   const [running, setRunning] = useState(false);
 
   const [lanes, setLanes] = useState<Record<string, LaneLine[]>>({});
@@ -130,6 +135,29 @@ export default function App() {
 
   useEffect(() => {
     fetch("/incidents").then((r) => r.json()).then(setIncidents).catch(() => {});
+  }, []);
+
+  // ---- Default the policy gate to whether OPA is actually reachable ----
+  // With `policy` on and OPA down, the gate fails closed (by design) and the
+  // intervention never runs — so a machine without `docker compose up opa`
+  // shows a safe but WRONG verdict (INC-4478 lands H1 @ 57%, not H2 @ 94%).
+  // Probing beats hardcoding either default: policy-gated when the stack is
+  // up, human-gated when it isn't.
+  //
+  // Deliberately skipped when the URL drives the run (`?auto=` / `&policy=`):
+  // the screenshot renderer must stay deterministic, and an async probe
+  // resolving mid-run would flip the toggle underneath it.
+  useEffect(() => {
+    const q = new URLSearchParams(window.location.search);
+    if (q.get("auto") || q.get("policy") !== null) return;
+    fetch("/policy/health")
+      .then((r) => (r.ok ? r.json() : null))
+      .then((h) => {
+        if (!h) return;
+        setOpaUp(!!h.available);
+        setPolicyOn(!!h.available);
+      })
+      .catch(() => {});
   }, []);
 
   // ---- URL-based auto-start (for headless screenshots) ----
@@ -440,7 +468,8 @@ export default function App() {
 
         {/* Tabs */}
         <nav className="tabs">
-          <button className={`tab ${tab === "console" ? "on" : ""}`} onClick={() => setTab("console")}>Console</button>
+          <button className={`tab ${tab === "live" ? "on" : ""}`} onClick={() => setTab("live")}>Live</button>
+          <button className={`tab ${tab === "console" ? "on" : ""}`} onClick={() => setTab("console")}>Replay Console</button>
           <button className={`tab ${tab === "metrics" ? "on" : ""}`} onClick={() => setTab("metrics")}>Ablation &amp; Calibration</button>
         </nav>
 
@@ -448,7 +477,7 @@ export default function App() {
         <div className="breadcrumb">
           <span>Home</span>
           <span className="crumbSep">/</span>
-          <span>{tab === "metrics" ? "Ablation" : "Investigations"}</span>
+          <span>{tab === "metrics" ? "Ablation" : tab === "live" ? "Live · checkout-service" : "Replay investigations"}</span>
           {tab === "console" && (
             <>
               <span className="crumbSep">/</span>
@@ -460,7 +489,7 @@ export default function App() {
 
         {/* Content */}
         <main className="content">
-          {tab === "metrics" ? <MetricsPanel /> : (
+          {tab === "live" ? <LivePanel /> : tab === "metrics" ? <MetricsPanel /> : (
             <>
               <div className="controls">
                 <select value={sel} onChange={(e) => setSel(e.target.value)} disabled={running}>
@@ -471,7 +500,17 @@ export default function App() {
                   ))}
                 </select>
                 <label className="chk"><input type="checkbox" checked={probesOn} onChange={(e) => setProbesOn(e.target.checked)} disabled={running} /> probes</label>
-                <label className="chk"><input type="checkbox" checked={policyOn} onChange={(e) => setPolicyOn(e.target.checked)} disabled={running} /> policy</label>
+                <label
+                  className="chk"
+                  title={
+                    opaUp === null ? "OPA reachability unknown"
+                      : opaUp ? "OPA reachable — state-changing actions are policy-gated"
+                      : "OPA unreachable — gate would fail closed and block the intervention. Run: docker compose up -d opa"
+                  }
+                >
+                  <input type="checkbox" checked={policyOn} onChange={(e) => setPolicyOn(e.target.checked)} disabled={running} /> policy
+                  {opaUp === false && <span className="chkHint"> · OPA down</span>}
+                </label>
                 <label className="chk"><input type="checkbox" checked={executeRollback} onChange={(e) => setExecuteRollback(e.target.checked)} disabled={running} /> execute</label>
                 <label className="chk"><input type="checkbox" checked={replay} onChange={(e) => setReplay(e.target.checked)} disabled={running} /> replay</label>
                 <button className="btn primary btnInvestigate" onClick={start} disabled={running || !incident}>

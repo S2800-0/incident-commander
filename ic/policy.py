@@ -25,7 +25,9 @@ from typing import Optional
 # HTTP client kept intentionally on the stdlib — one less dep, and this module's
 # only external call is a single POST to a well-known endpoint.
 
-OPA_URL = os.environ.get("IC_OPA_URL", "http://localhost:8181")
+# 127.0.0.1, not localhost: on Windows, `localhost` resolves to ::1 first and a
+# refused IPv6 connect costs ~2s before IPv4 is tried — every policy decision paid it.
+OPA_URL = os.environ.get("IC_OPA_URL", "http://127.0.0.1:8181")
 POLICY_PATH = "/v1/data/incident/action/decision"
 TIMEOUT_S = float(os.environ.get("IC_OPA_TIMEOUT_S", "2.0"))
 
