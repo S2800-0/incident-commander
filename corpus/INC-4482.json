@@ -2,16 +2,13 @@
   "bundle_version": "1.0",
   "incident_id": "INC-4482",
   "slice": "ambiguous",
-  "title": "notifications-service latency spike — subscription-fanout deploy vs shared broker overload",
-
+  "title": "notifications-service latency spike \u2014 subscription-fanout deploy vs shared broker overload",
   "ground_truth": {
     "root_cause_id": "H2",
-    "summary": "Deploy v2.7.0 introduced a subscription-fanout regression that quietly increased per-message publish overhead. Passive checks look compatible with either broker overload (H1) or the deploy (H2) — same shape as INC-4478, different service. The traffic-shift intervention shifts 5% of publish traffic back to v2.6.0. The old-version cohort recovers to baseline; the new-version cohort stays slow. Deploy confirmed. Rollback recommended. The verification signal (p95 publish latency on the canary cohort) recovers to within the band — this is the clean autonomous-success demo, distinct from INC-4478 by service, signal, and payload shape.",
+    "summary": "Deploy v2.7.0 introduced a subscription-fanout regression that quietly increased per-message publish overhead. Passive checks look compatible with either broker overload (H1) or the deploy (H2) \u2014 same shape as INC-4478, different service. The traffic-shift intervention shifts 5% of publish traffic back to v2.6.0. The old-version cohort recovers to baseline; the new-version cohort stays slow. Deploy confirmed. Rollback recommended. The verification signal (p95 publish latency on the canary cohort) recovers to within the band \u2014 this is the clean autonomous-success demo, distinct from INC-4478 by service, signal, and payload shape.",
     "rollback_correct": true
   },
-
   "human_baseline_seconds": 2600,
-
   "alert": {
     "service": "notifications-service",
     "environment": "production",
@@ -21,36 +18,64 @@
     "condition": "p95 2,340ms > threshold 1000ms",
     "source": "pagerduty"
   },
-
   "topology": {
-    "nodes": ["notifications-service", "message-broker"],
-    "edges": [{ "from": "notifications-service", "to": "message-broker" }]
+    "nodes": [
+      "notifications-service",
+      "message-broker"
+    ],
+    "edges": [
+      {
+        "from": "notifications-service",
+        "to": "message-broker"
+      }
+    ]
   },
-
   "observables": [
-    { "name": "broker_pressure_signal", "unit": "map", "desc": "message-broker pressure snapshot — queue depth, publish IOPS, active connections" },
-    { "name": "app_error_signal",       "unit": "map", "desc": "notifications-service publisher error breakdown by class" },
-    { "name": "traffic_cohort_split",   "unit": "map", "desc": "p95 publish latency of the two version cohorts AFTER a controlled traffic-shift intervention" }
+    {
+      "name": "broker_pressure_signal",
+      "unit": "map",
+      "desc": "message-broker pressure snapshot \u2014 queue depth, publish IOPS, active connections"
+    },
+    {
+      "name": "app_error_signal",
+      "unit": "map",
+      "desc": "notifications-service publisher error breakdown by class"
+    },
+    {
+      "name": "traffic_cohort_split",
+      "unit": "map",
+      "desc": "p95 publish latency of the two version cohorts AFTER a controlled traffic-shift intervention"
+    }
   ],
-
   "customer_impact": {
     "tier": "P1",
     "affected_users": 8600,
     "sla_breach": true,
     "revenue_tagged_service": false,
     "impact_source": "delivery notifications delayed for 8,600 active order-tracking subscribers",
-    "_note_for_authors": "P1 — customer-facing degradation (notifications delayed), SLA breach on notification-latency contract, but not a direct revenue path. Higher CIS than P2/P3 but lower than P0. Used as an INC-4478 counterpart with a non-revenue high-urgency incident."
+    "_note_for_authors": "P1 \u2014 customer-facing degradation (notifications delayed), SLA breach on notification-latency contract, but not a direct revenue path. Higher CIS than P2/P3 but lower than P0. Used as an INC-4478 counterpart with a non-revenue high-urgency incident."
   },
-
   "seed_hypotheses": [
     {
       "id": "H1",
       "claim": "The shared message-broker is under overload (queue backlog, publish backpressure); the app-side deploy is coincidental.",
       "natural_owner": "telemetry_agent",
       "predicted_observations": [
-        { "observable": "broker_pressure_signal", "prediction": "shows_pressure",     "note": "if the broker is at fault, queue depth / publish IOPS / connections all elevated" },
-        { "observable": "app_error_signal",       "prediction": "mixed_upstream_wait","note": "app errors dominated by publish-timeout; ambiguous alone" },
-        { "observable": "traffic_cohort_split",   "prediction": "cohorts_uniform",   "note": "if the broker is the cause, BOTH cohorts see the same slow p95 after the shift" }
+        {
+          "observable": "broker_pressure_signal",
+          "prediction": "shows_pressure",
+          "note": "if the broker is at fault, queue depth / publish IOPS / connections all elevated"
+        },
+        {
+          "observable": "app_error_signal",
+          "prediction": "mixed_upstream_wait",
+          "note": "app errors dominated by publish-timeout; ambiguous alone"
+        },
+        {
+          "observable": "traffic_cohort_split",
+          "prediction": "cohorts_uniform",
+          "note": "if the broker is the cause, BOTH cohorts see the same slow p95 after the shift"
+        }
       ]
     },
     {
@@ -58,13 +83,24 @@
       "claim": "Deploy v2.7.0 introduced a subscription-fanout regression that quietly increased per-message overhead; roll it back.",
       "natural_owner": "change_agent",
       "predicted_observations": [
-        { "observable": "broker_pressure_signal", "prediction": "shows_pressure",     "note": "a fanout regression also drives broker pressure — passive signal is ambiguous" },
-        { "observable": "app_error_signal",       "prediction": "mixed_upstream_wait","note": "same publish-timeout signature — ambiguous" },
-        { "observable": "traffic_cohort_split",   "prediction": "cohorts_diverge",   "note": "if the deploy is guilty, the new-version cohort stays slow while the old-version cohort recovers after the shift" }
+        {
+          "observable": "broker_pressure_signal",
+          "prediction": "shows_pressure",
+          "note": "a fanout regression also drives broker pressure \u2014 passive signal is ambiguous"
+        },
+        {
+          "observable": "app_error_signal",
+          "prediction": "mixed_upstream_wait",
+          "note": "same publish-timeout signature \u2014 ambiguous"
+        },
+        {
+          "observable": "traffic_cohort_split",
+          "prediction": "cohorts_diverge",
+          "note": "if the deploy is guilty, the new-version cohort stays slow while the old-version cohort recovers after the shift"
+        }
       ]
     }
   ],
-
   "evidence": {
     "prior": [
       {
@@ -89,7 +125,10 @@
         "payload": {
           "commit_sha": "c8ee421",
           "files": [
-            { "path": "src/publisher/fanout.py", "hunk": "-        for sub in subs:\n-            broker.publish(sub, msg)\n+        for sub in subs:\n+            broker.publish(sub, msg, ack=True)" }
+            {
+              "path": "src/publisher/fanout.py",
+              "hunk": "-        for sub in subs:\n-            broker.publish(sub, msg)\n+        for sub in subs:\n+            broker.publish(sub, msg, ack=True)"
+            }
           ]
         }
       },
@@ -102,9 +141,18 @@
         "payload": {
           "unit": "ms",
           "series": [
-            ["2026-09-07T09:00:00Z", 480],
-            ["2026-09-07T09:08:00Z", 1580],
-            ["2026-09-07T09:15:00Z", 2340]
+            [
+              "2026-09-07T09:00:00Z",
+              480
+            ],
+            [
+              "2026-09-07T09:08:00Z",
+              1580
+            ],
+            [
+              "2026-09-07T09:15:00Z",
+              2340
+            ]
           ]
         }
       },
@@ -114,13 +162,22 @@
         "retrieved_at": "2026-09-07T09:15:44Z",
         "measures": [],
         "probe_id": null,
-        "_note_for_authors": "Broker is showing elevated queue depth — ambiguous. Could be broker overload OR the deploy driving more publishes.",
+        "_note_for_authors": "Broker is showing elevated queue depth \u2014 ambiguous. Could be broker overload OR the deploy driving more publishes.",
         "payload": {
           "unit": "count",
           "series": [
-            ["2026-09-07T09:00:00Z", 320],
-            ["2026-09-07T09:08:00Z", 990],
-            ["2026-09-07T09:15:00Z", 1840]
+            [
+              "2026-09-07T09:00:00Z",
+              320
+            ],
+            [
+              "2026-09-07T09:08:00Z",
+              990
+            ],
+            [
+              "2026-09-07T09:15:00Z",
+              1840
+            ]
           ]
         }
       },
@@ -137,73 +194,117 @@
         }
       }
     ],
-
     "probeable": [
       {
         "source_type": "probe_result",
         "source_uri": "prometheus://message-broker/deep_pressure",
         "retrieved_at": null,
-        "measures": ["broker_pressure_signal"],
+        "measures": [
+          "broker_pressure_signal"
+        ],
         "probe_id": "P_broker_deep",
         "_note_for_authors": "Distractor: both hypotheses predict shows_pressure, info-gain 0.",
         "payload": {
-          "map": { "queue_depth": 1900, "publish_iops": 8100, "active_connections": 54 }
+          "map": {
+            "queue_depth": 1900,
+            "publish_iops": 8100,
+            "active_connections": 54
+          }
         }
       },
       {
         "source_type": "probe_result",
         "source_uri": "logs://notifications-service/error_class_breakdown",
         "retrieved_at": null,
-        "measures": ["app_error_signal"],
+        "measures": [
+          "app_error_signal"
+        ],
         "probe_id": "P_app_errors",
         "_note_for_authors": "Distractor: mixed_upstream_wait matches both, info-gain 0.",
         "payload": {
-          "map": { "PublishTimeout": 740, "NullPointer": 4, "AuthError": 0 }
+          "map": {
+            "PublishTimeout": 740,
+            "NullPointer": 4,
+            "AuthError": 0
+          }
         }
+      },
+      {
+        "source_type": "metric",
+        "source_uri": "prometheus://notifications-service/cohort_split",
+        "measures": [
+          "traffic_cohort_split"
+        ],
+        "probe_id": "P_cohort_split",
+        "payload": {
+          "map": {
+            "tenant_A_publish_ms": 780.0,
+            "tenant_B_publish_ms": 190.0
+          }
+        },
+        "retrieved_at": null
       }
     ],
-
     "intervention_results": [
       {
         "source_type": "intervention_result",
         "source_uri": "traffic-shifter://notifications-service/I_traffic_shift",
         "retrieved_at": null,
-        "measures": ["traffic_cohort_split"],
+        "measures": [
+          "traffic_cohort_split"
+        ],
         "probe_id": "I_traffic_shift",
-        "_note_for_authors": "THE CAUSAL TEST. Shift 5% of publish traffic back to v2.6.0 for 60s. Old-version cohort recovers to ~340ms baseline; new-version cohort stays at 2280ms. Cohorts diverge — deploy confirmed. Same pattern as INC-4478's traffic_cohort_split.",
+        "_note_for_authors": "THE CAUSAL TEST. Shift 5% of publish traffic back to v2.6.0 for 60s. Old-version cohort recovers to ~340ms baseline; new-version cohort stays at 2280ms. Cohorts diverge \u2014 deploy confirmed. Same pattern as INC-4478's traffic_cohort_split.",
         "payload": {
-          "map": { "cohort_v_new_p95_ms": 2280.0, "cohort_v_old_p95_ms": 340.0 }
+          "map": {
+            "cohort_v_new_p95_ms": 2280.0,
+            "cohort_v_old_p95_ms": 340.0
+          }
         }
       }
     ],
-
     "verification_result": {
       "signal": "publish_latency_p95_canary_cohort",
       "baseline_value": 480,
       "post_intervention_value": 340,
-      "recovery_band": { "max": 900 },
+      "recovery_band": {
+        "max": 900
+      },
       "measured_at": "2026-09-07T09:19:00Z",
       "source_uri": "otlp://notifications-service/metric/publish_latency_p95_canary_cohort",
-      "_note_for_authors": "The canary cohort (routed to v2.6.0) recovers to 340ms — well within the 900ms band. Clean autonomous-success case: intervention fired, recovery verified, no human touch needed. Contrast with INC-4481 where recovery fails."
+      "_note_for_authors": "The canary cohort (routed to v2.6.0) recovers to 340ms \u2014 well within the 900ms band. Clean autonomous-success case: intervention fired, recovery verified, no human touch needed. Contrast with INC-4481 where recovery fails."
     }
   },
-
   "probe_catalog": [
     {
       "probe_id": "P_broker_deep",
       "connector": "prometheus",
-      "measures": ["broker_pressure_signal"],
+      "measures": [
+        "broker_pressure_signal"
+      ],
       "cost_ms": 450,
       "load_class": "read_light",
-      "description": "message-broker deep pressure snapshot — queue depth, publish IOPS, connections"
+      "description": "message-broker deep pressure snapshot \u2014 queue depth, publish IOPS, connections"
     },
     {
       "probe_id": "P_app_errors",
       "connector": "logs",
-      "measures": ["app_error_signal"],
+      "measures": [
+        "app_error_signal"
+      ],
       "cost_ms": 540,
       "load_class": "read_light",
-      "description": "notifications-service publisher error breakdown, 09:00–09:15"
+      "description": "notifications-service publisher error breakdown, 09:00\u201309:15"
+    },
+    {
+      "probe_id": "P_cohort_split",
+      "connector": "prometheus",
+      "measures": [
+        "traffic_cohort_split"
+      ],
+      "cost_ms": 320,
+      "load_class": "read_light",
+      "description": "notifications-service publish latency split by tenant cohort, 09:00\u201309:12"
     }
   ]
 }

@@ -225,6 +225,21 @@
             "TimeoutError": 3
           }
         }
+      },
+      {
+        "source_type": "metric",
+        "source_uri": "prometheus://checkout-service/cohort_split",
+        "measures": [
+          "traffic_cohort_split"
+        ],
+        "probe_id": "P_cohort_split",
+        "payload": {
+          "map": {
+            "cohort_A_5xx_pct": 42.0,
+            "cohort_B_5xx_pct": 5.0
+          }
+        },
+        "retrieved_at": null
       }
     ],
     "intervention_results": [
@@ -277,6 +292,16 @@
       "cost_ms": 520,
       "load_class": "read_light",
       "description": "checkout-service exception breakdown by class, 15:00\u201315:07"
+    },
+    {
+      "probe_id": "P_cohort_split",
+      "connector": "prometheus",
+      "measures": [
+        "traffic_cohort_split"
+      ],
+      "cost_ms": 300,
+      "load_class": "read_light",
+      "description": "checkout-service 5xx rate split by traffic cohort (A/B), 15:00\u201315:07"
     }
   ],
   "customer_impact": {
