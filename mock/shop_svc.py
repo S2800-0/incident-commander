@@ -542,6 +542,77 @@ def chaos_state() -> dict:
 
 
 # ============================================================================
+# Load generator — in-process traffic generator.
+# Same open-loop tick-based scheduler as mock/loadgen.py, exposed as an API
+# so the console can toggle it without an extra terminal window.
+# ============================================================================
+
+import httpx as _httpx
+
+_loadgen_task: Optional[asyncio.Task] = None
+_loadgen_rps: float = 0.0
+
+
+async def _loadgen_run(rps: float, max_inflight: int = 300) -> None:
+    """Fire GET /shop/checkout on this same service at `rps` requests/sec."""
+    sem = asyncio.Semaphore(max_inflight)
+    inflight: set[asyncio.Task] = set()
+    limits = _httpx.Limits(max_connections=max_inflight, max_keepalive_connections=max_inflight)
+    async with _httpx.AsyncClient(base_url="http://127.0.0.1:9001", timeout=5.0, limits=limits) as client:
+        async def one() -> None:
+            try: await client.get("/shop/checkout")
+            except _httpx.HTTPError: pass
+            finally: sem.release()
+
+        TICK_S = 0.05
+        start = time.perf_counter()
+        scheduled = 0
+        while True:
+            await asyncio.sleep(TICK_S)
+            due = int((time.perf_counter() - start) * rps) - scheduled
+            if due > rps: scheduled += due - int(rps); due = int(rps)
+            for _ in range(due):
+                scheduled += 1
+                if sem.locked(): continue
+                await sem.acquire()
+                t = asyncio.create_task(one())
+                inflight.add(t)
+                t.add_done_callback(inflight.discard)
+
+
+@app.post("/loadgen/start")
+async def loadgen_start(rps: float = 60.0) -> dict:
+    """Start (or replace) the in-process load generator at the given rps."""
+    global _loadgen_task, _loadgen_rps
+    if _loadgen_task and not _loadgen_task.done():
+        _loadgen_task.cancel()
+        try: await _loadgen_task
+        except (asyncio.CancelledError, Exception): pass
+    _loadgen_task = asyncio.create_task(_loadgen_run(rps))
+    _loadgen_rps = rps
+    return {"ok": True, "rps": rps, "running": True}
+
+
+@app.post("/loadgen/stop")
+async def loadgen_stop() -> dict:
+    """Stop the in-process load generator."""
+    global _loadgen_task, _loadgen_rps
+    if _loadgen_task and not _loadgen_task.done():
+        _loadgen_task.cancel()
+        try: await _loadgen_task
+        except (asyncio.CancelledError, Exception): pass
+    _loadgen_task = None
+    _loadgen_rps = 0.0
+    return {"ok": True, "running": False}
+
+
+@app.get("/loadgen/state")
+def loadgen_state() -> dict:
+    running = bool(_loadgen_task and not _loadgen_task.done())
+    return {"running": running, "rps": _loadgen_rps if running else 0.0}
+
+
+# ============================================================================
 # Legacy endpoints — kept for the replay-mode console panel and the replay
 # orchestrator's rollback executor (ic/orchestrator.py).
 # ============================================================================

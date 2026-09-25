@@ -82,7 +82,10 @@ export default function LivePanel() {
   const [events, setEvents] = useState<LiveEvent[]>([]);
   const [env, setEnv] = useState<any>(null);
   const [focus, setFocus] = useState<string | null>(null);
-  const [showEnv, setShowEnv] = useState(false);
+  const [showEnv, setShowEnv] = useState(true);
+  const [resetBusy, setResetBusy] = useState(false);
+  const [loadgen, setLoadgen] = useState<{ running: boolean; rps: number } | null>(null);
+  const [loadgenBusy, setLoadgenBusy] = useState(false);
   const [envBusy, setEnvBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
   const lastSeq = useRef(0);
@@ -110,9 +113,13 @@ export default function LivePanel() {
     const pullEnv = async () => {
       try { const r = await fetch("/api/chaos/state"); if (alive && r.ok) setEnv(await r.json()); } catch { if (alive) setEnv(null); }
     };
-    pullState(); pullEvents(); pullEnv();
-    const a = setInterval(pullState, 1000), b = setInterval(pullEvents, 600), c = setInterval(pullEnv, 2500);
-    return () => { alive = false; clearInterval(a); clearInterval(b); clearInterval(c); };
+    const pullLoadgen = async () => {
+      try { const r = await fetch("/api/loadgen/state"); if (alive && r.ok) setLoadgen(await r.json()); } catch { if (alive) setLoadgen(null); }
+    };
+    pullState(); pullEvents(); pullEnv(); pullLoadgen();
+    const a = setInterval(pullState, 1000), b = setInterval(pullEvents, 600),
+          c = setInterval(pullEnv, 2500), d = setInterval(pullLoadgen, 2500);
+    return () => { alive = false; clearInterval(a); clearInterval(b); clearInterval(c); clearInterval(d); };
   }, []);
 
   const active = state?.active_incident?.incident_id as string | undefined;
@@ -125,6 +132,28 @@ export default function LivePanel() {
   async function inject(path: string) {
     setEnvBusy(true);
     try { await fetch(`/api/chaos/${path}`, { method: "POST" }); setFocus(null); } finally { setEnvBusy(false); }
+  }
+
+  // Full reset — stops any active chaos scenario AND flips the target service
+  // back to its healthy stable-release baseline. Use this between demo runs so
+  // no residual scenario state contaminates the next one.
+  async function resetToBaseline() {
+    setResetBusy(true);
+    try {
+      await fetch("/api/chaos/clear", { method: "POST" });
+      await fetch("/api/shop/reset", { method: "POST" });
+      setFocus(null);
+    } finally { setResetBusy(false); }
+  }
+
+  // Toggle the in-process load generator on shop-svc. Without traffic there is
+  // nothing for the SLO detector to observe, so the pipeline never fires.
+  async function toggleLoadgen() {
+    setLoadgenBusy(true);
+    try {
+      const running = !!loadgen?.running;
+      await fetch(running ? "/api/loadgen/stop" : "/api/loadgen/start?rps=60", { method: "POST" });
+    } finally { setLoadgenBusy(false); }
   }
 
   const h = state?.service_health;
@@ -390,8 +419,20 @@ export default function LivePanel() {
                 <button key={s.id} className="btn" disabled={envBusy || !!active} onClick={() => inject(`scenario/${s.id}`)} title={s.expect}>{s.label}</button>
               ))}
               <button className="btn" disabled={envBusy} onClick={() => inject("clear")}>Clear faults</button>
+              <button
+                className={`btn ${loadgen?.running ? "btn-load-on" : "btn-load-off"}`}
+                disabled={loadgenBusy}
+                onClick={toggleLoadgen}
+                title="In-process load generator against /shop/checkout at 60 rps. Without traffic, the SLO detector has nothing to observe."
+              >{loadgenBusy ? "…" : (loadgen?.running ? `⏸ Stop traffic (${loadgen.rps.toFixed(0)} rps)` : "▶ Start traffic (60 rps)")}</button>
+              <button
+                className="btn btn-reset"
+                disabled={resetBusy}
+                onClick={resetToBaseline}
+                title="Stop any active fault AND flip the target service back to healthy v6.09.0 baseline"
+              >{resetBusy ? "Resetting…" : "⟲ Reset to baseline"}</button>
             </div>
-            <div className="lv-muted">injected now: <b>{env?.scenario ?? "none"}</b>{active ? " · wait for the current incident to close before injecting another" : ""}</div>
+            <div className="lv-muted">injected now: <b>{env?.scenario ?? "none"}</b> · traffic <b>{loadgen?.running ? `${loadgen.rps.toFixed(0)} rps` : "off"}</b>{active ? " · wait for the current incident to close before injecting another" : ""}</div>
           </div>
         )}
       </section>

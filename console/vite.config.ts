@@ -19,6 +19,7 @@ export default defineConfig({
       // Environment fault injection (live mode) — the target's chaos API, never IC.
       "/api/chaos": { target: "http://127.0.0.1:9001", rewrite: (p) => p.replace(/^\/api/, "") },
       "/api/ops": { target: "http://127.0.0.1:9001", rewrite: (p) => p.replace(/^\/api/, "") },
+      "/api/loadgen": { target: "http://127.0.0.1:9001", rewrite: (p) => p.replace(/^\/api/, "") },
     },
   },
 });

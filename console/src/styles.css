@@ -917,3 +917,21 @@ input, select { font: inherit; }
 .lv-env h2 { text-transform: none; letter-spacing: 0; }
 .lv-env .body p { margin: 0 0 10px; max-width: 80ch; }
 .lv-envRow { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 8px; }
+.btn.btn-reset {
+  margin-left: auto;
+  background: #0e326e;
+  color: #fff;
+  border-color: #0e326e;
+  font-weight: 600;
+}
+.btn.btn-reset:hover:not(:disabled) { background: #1a4a96; border-color: #1a4a96; }
+.btn.btn-reset:disabled { opacity: 0.55; cursor: not-allowed; }
+.btn.btn-load-off {
+  background: #fff; color: #0d7a4f; border-color: #0d7a4f; font-weight: 600;
+}
+.btn.btn-load-off:hover:not(:disabled) { background: #e8f5ef; }
+.btn.btn-load-on {
+  background: #0d7a4f; color: #fff; border-color: #0d7a4f; font-weight: 600;
+}
+.btn.btn-load-on:hover:not(:disabled) { background: #0f8f5b; border-color: #0f8f5b; }
+.btn.btn-load-on::before, .btn.btn-load-off::before { content: ""; }
