@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { AGENTS, EvidenceLeaf, Hypothesis, ICEvent, Incident } from "./types";
 import MetricsPanel from "./MetricsPanel";
+import LivePanel from "./LivePanel";
 
 type LaneLine = { t: number; text: string; kind: string; hyp?: string };
 type Ambiguity = { margin: number; tau: number; reason?: string; resolvable: boolean; note?: string } | null;
@@ -13,6 +14,18 @@ type VoiState = { step: number; actions: VoiAction[] } | null;
 type Stagnation = { best_observation: string | null; best_observation_eig: number; intervention_eig: number | null; intervention_available?: boolean } | null;
 type GatePending = { action: string; intervention_id?: string; description?: string; safety_envelope?: any; note?: string } | null;
 type InterventionResult = { intervention_id: string; summary: string; hash: string } | null;
+
+// Shipped-in-final-pivot event types — surfaced in the new panels.
+type PolicyDecisionEvt = { action: string; allow: boolean; reasons: string[]; engine_available: boolean; thresholds?: any; intervention_id?: string; description?: string; note?: string };
+type VerificationEvt = { intervention_id?: string; recovered: boolean; signal?: string; baseline_value?: number | null; post_intervention_value?: number | null; recovery_band?: any; reasoning?: string; source_uri?: string; synthesised?: boolean };
+type AutoRevertEvt = { intervention_id?: string; reason: string; safety_envelope?: any };
+type CustomerImpactEvt = { tier?: string | null; affected_users: number; sla_breach: boolean; revenue_tagged_service: boolean; impact_source: string; cis_score: number; components?: Record<string, number> };
+type DynamicMetaEvt = { count?: number; reasoning_summary?: string; mode?: string; reason?: string; note?: string };
+type DynamicHypEvt = { id: string; claim: string; confidence: number; natural_owner?: string; supporting_evidence: string[]; contradicting_evidence: string[]; discriminating_signals: string[] };
+type ActionBlockedEvt = { action: string; intervention_id?: string; reasons: string[]; engine_available: boolean; note?: string };
+// Real rollback execution against the mock target service.
+type TargetServiceState = { version: string; error_rate: number; p95_ms: number; since: number; reason: string };
+type RollbackExecEvt = { target: string; target_state?: TargetServiceState; summary?: string; error?: string; note?: string; kind: "started" | "executed" | "failed" };
 
 const AGENT_LABEL: Record<string, string> = {
   change_agent: "Change",
@@ -71,8 +84,13 @@ export default function App() {
   const [incidents, setIncidents] = useState<Incident[]>([]);
   const [sel, setSel] = useState<string>("INC-4471");
   const [probesOn, setProbesOn] = useState(true);
-  const [replay, setReplay] = useState(true);
-  const [tab, setTab] = useState<"console" | "metrics">("console");
+  const [replay, setReplay] = useState(false);          // live path by default, replays are backup
+  const [policyOn, setPolicyOn] = useState(true);       // NoOps mode — OPA gate, verification, CIS
+  // null = still probing. Drives the default of `policyOn`: see the effect below.
+  const [opaUp, setOpaUp] = useState<boolean | null>(null);
+  // Live mode is the default view; `?auto=` (the replay screenshot renderer) keeps the replay console.
+  const [tab, setTab] = useState<"live" | "console" | "metrics">(
+    () => (new URLSearchParams(window.location.search).get("auto") ? "console" : "live"));
   const [running, setRunning] = useState(false);
 
   const [lanes, setLanes] = useState<Record<string, LaneLine[]>>({});
@@ -93,6 +111,20 @@ export default function App() {
   const [interventionGate, setInterventionGate] = useState<GatePending>(null);
   const [interventionApproved, setInterventionApproved] = useState(false);
   const [interventionResult, setInterventionResult] = useState<InterventionResult>(null);
+  // ---- Newly-shipped state ----
+  const [policyDecisions, setPolicyDecisions] = useState<PolicyDecisionEvt[]>([]);
+  const [verification, setVerification] = useState<VerificationEvt | null>(null);
+  const [verifying, setVerifying] = useState<boolean>(false);
+  const [autoRevert, setAutoRevert] = useState<AutoRevertEvt | null>(null);
+  const [customerImpact, setCustomerImpact] = useState<CustomerImpactEvt | null>(null);
+  const [dynamicMeta, setDynamicMeta] = useState<DynamicMetaEvt | null>(null);
+  const [dynamicHyps, setDynamicHyps] = useState<Record<string, DynamicHypEvt>>({});
+  const [actionBlocked, setActionBlocked] = useState<ActionBlockedEvt | null>(null);
+  // Target-service (real HTTP execution) — pre-rollback state + rollback events.
+  const [executeRollback, setExecuteRollback] = useState<boolean>(true);
+  const [targetPre, setTargetPre] = useState<TargetServiceState | null>(null);
+  const [targetPost, setTargetPost] = useState<TargetServiceState | null>(null);
+  const [rollbackExec, setRollbackExec] = useState<RollbackExecEvt | null>(null);
   const [panel, setPanel] = useState<PanelKind>(null);
   const [query, setQuery] = useState<string>("");
 
@@ -104,6 +136,51 @@ export default function App() {
   useEffect(() => {
     fetch("/incidents").then((r) => r.json()).then(setIncidents).catch(() => {});
   }, []);
+
+  // ---- Default the policy gate to whether OPA is actually reachable ----
+  // With `policy` on and OPA down, the gate fails closed (by design) and the
+  // intervention never runs — so a machine without `docker compose up opa`
+  // shows a safe but WRONG verdict (INC-4478 lands H1 @ 57%, not H2 @ 94%).
+  // Probing beats hardcoding either default: policy-gated when the stack is
+  // up, human-gated when it isn't.
+  //
+  // Deliberately skipped when the URL drives the run (`?auto=` / `&policy=`):
+  // the screenshot renderer must stay deterministic, and an async probe
+  // resolving mid-run would flip the toggle underneath it.
+  useEffect(() => {
+    const q = new URLSearchParams(window.location.search);
+    if (q.get("auto") || q.get("policy") !== null) return;
+    fetch("/policy/health")
+      .then((r) => (r.ok ? r.json() : null))
+      .then((h) => {
+        if (!h) return;
+        setOpaUp(!!h.available);
+        setPolicyOn(!!h.available);
+      })
+      .catch(() => {});
+  }, []);
+
+  // ---- URL-based auto-start (for headless screenshots) ----
+  // Usage: /?auto=INC-4478  (auto-clicks Investigate on load; skip replay)
+  // Optional: &policy=0 to turn OPA gate off, &probes=0 to run the OFF arm.
+  useEffect(() => {
+    if (!incidents.length) return;
+    const q = new URLSearchParams(window.location.search);
+    const auto = q.get("auto");
+    if (!auto) return;
+    if (!incidents.find((i) => i.incident_id === auto)) return;
+    setSel(auto);
+    if (q.get("policy") === "0") setPolicyOn(false);
+    if (q.get("probes") === "0") setProbesOn(false);
+    if (q.get("execute") === "0") setExecuteRollback(false);
+    setReplay(false);
+    const t = setTimeout(() => {
+      // schedule after state settles so `sel` change flushes
+      const btn = document.querySelector<HTMLButtonElement>(".btnInvestigate");
+      btn?.click();
+    }, 300);
+    return () => clearTimeout(t);
+  }, [incidents]);
 
   const incident = incidents.find((i) => i.incident_id === sel);
   const filteredIncidents = useMemo(() => {
@@ -120,6 +197,10 @@ export default function App() {
     setLeaves([]); setSealed(null); setVerdict(null); setGate(null);
     setVoi(null); setStagnation(null); setInterventionWouldFire(null); setProvenance(null);
     setInterventionGate(null); setInterventionApproved(false); setInterventionResult(null);
+    setPolicyDecisions([]); setVerification(null); setVerifying(false);
+    setAutoRevert(null); setCustomerImpact(null); setDynamicMeta(null);
+    setDynamicHyps({}); setActionBlocked(null);
+    setTargetPre(null); setTargetPost(null); setRollbackExec(null);
     gatePausedRef.current = false;
     queuedRef.current = [];
   }
@@ -212,6 +293,75 @@ export default function App() {
       case "chain_sealed":
         setSealed({ merkle_root: e.merkle_root, signature: e.signature, leaf_count: e.leaf_count });
         break;
+      // ---- Newly-shipped events ----
+      case "policy_decision":
+        setPolicyDecisions((prev) => [...prev, {
+          action: e.action, allow: e.allow, reasons: e.reasons || [],
+          engine_available: e.engine_available, thresholds: e.thresholds,
+          intervention_id: e.intervention_id, description: e.description, note: e.note,
+        }]);
+        break;
+      case "action_blocked":
+        setActionBlocked({
+          action: e.action, intervention_id: e.intervention_id,
+          reasons: e.reasons || [], engine_available: e.engine_available, note: e.note,
+        });
+        break;
+      case "verification_started":
+        setVerifying(true);
+        break;
+      case "verification_result":
+        setVerifying(false);
+        setVerification({
+          intervention_id: e.intervention_id, recovered: e.recovered, signal: e.signal,
+          baseline_value: e.baseline_value, post_intervention_value: e.post_intervention_value,
+          recovery_band: e.recovery_band, reasoning: e.reasoning,
+          source_uri: e.source_uri, synthesised: e.synthesised,
+        });
+        break;
+      case "auto_revert_triggered":
+        setAutoRevert({
+          intervention_id: e.intervention_id, reason: e.reason,
+          safety_envelope: e.safety_envelope,
+        });
+        break;
+      case "customer_impact_computed":
+        setCustomerImpact({
+          tier: e.tier, affected_users: e.affected_users, sla_breach: e.sla_breach,
+          revenue_tagged_service: e.revenue_tagged_service, impact_source: e.impact_source,
+          cis_score: e.cis_score, components: e.components,
+        });
+        break;
+      case "hypothesis_generated":
+        setDynamicHyps((prev) => ({ ...prev, [e.id]: {
+          id: e.id, claim: e.claim, confidence: e.confidence,
+          natural_owner: e.natural_owner,
+          supporting_evidence: e.supporting_evidence || [],
+          contradicting_evidence: e.contradicting_evidence || [],
+          discriminating_signals: e.discriminating_signals || [],
+        }}));
+        break;
+      case "dynamic_generation_started":
+        setDynamicMeta({ mode: "dynamic", note: "generating hypotheses from raw context…" });
+        break;
+      case "dynamic_generation_completed":
+        setDynamicMeta((prev) => ({ ...(prev || {}), mode: "dynamic",
+          count: e.count, reasoning_summary: e.reasoning_summary }));
+        break;
+      case "dynamic_generation_fallback":
+        setDynamicMeta({ mode: "fallback", reason: e.reason, note: e.note });
+        break;
+      // ---- Real rollback execution (Sep 22) — target service reacts ----
+      case "rollback_execution_started":
+        setRollbackExec({ kind: "started", target: e.target, note: e.note });
+        break;
+      case "rollback_executed":
+        setRollbackExec({ kind: "executed", target: e.target, target_state: e.target_state, summary: e.summary });
+        setTargetPost(e.target_state);
+        break;
+      case "rollback_execution_failed":
+        setRollbackExec({ kind: "failed", target: e.target, error: e.error, note: e.note });
+        break;
       case "done":
         setRunning(false);
         break;
@@ -239,10 +389,21 @@ export default function App() {
     reset();
     setRunning(true);
     startRef.current = performance.now();
+    // Prime the target-service panel with the "before" snapshot. Uses the
+    // vite proxy on same origin.
+    fetch("/api/shop/health").then((r) => (r.ok ? r.json() : null)).then((s) => s && setTargetPre(s)).catch(() => {});
     const proto = location.protocol === "https:" ? "wss" : "ws";
     const ws = new WebSocket(`${proto}://${location.host}/ws`);
     wsRef.current = ws;
-    ws.onopen = () => ws.send(JSON.stringify({ incident_id: sel, probes_enabled: probesOn, replay }));
+    const q = new URLSearchParams(window.location.search);
+    const speed = parseFloat(q.get("speed") || "1") || 1;
+    ws.onopen = () => ws.send(JSON.stringify({
+      incident_id: sel,
+      probes_enabled: probesOn, replay,
+      policy_enabled: policyOn,
+      execute_rollback: executeRollback,
+      speed,
+    }));
     ws.onmessage = (m) => dispatch(JSON.parse(m.data));
     ws.onclose = () => setRunning(false);
   }
@@ -307,7 +468,8 @@ export default function App() {
 
         {/* Tabs */}
         <nav className="tabs">
-          <button className={`tab ${tab === "console" ? "on" : ""}`} onClick={() => setTab("console")}>Console</button>
+          <button className={`tab ${tab === "live" ? "on" : ""}`} onClick={() => setTab("live")}>Live</button>
+          <button className={`tab ${tab === "console" ? "on" : ""}`} onClick={() => setTab("console")}>Replay Console</button>
           <button className={`tab ${tab === "metrics" ? "on" : ""}`} onClick={() => setTab("metrics")}>Ablation &amp; Calibration</button>
         </nav>
 
@@ -315,7 +477,7 @@ export default function App() {
         <div className="breadcrumb">
           <span>Home</span>
           <span className="crumbSep">/</span>
-          <span>{tab === "metrics" ? "Ablation" : "Investigations"}</span>
+          <span>{tab === "metrics" ? "Ablation" : tab === "live" ? "Live · checkout-service" : "Replay investigations"}</span>
           {tab === "console" && (
             <>
               <span className="crumbSep">/</span>
@@ -327,7 +489,7 @@ export default function App() {
 
         {/* Content */}
         <main className="content">
-          {tab === "metrics" ? <MetricsPanel /> : (
+          {tab === "live" ? <LivePanel /> : tab === "metrics" ? <MetricsPanel /> : (
             <>
               <div className="controls">
                 <select value={sel} onChange={(e) => setSel(e.target.value)} disabled={running}>
@@ -338,6 +500,18 @@ export default function App() {
                   ))}
                 </select>
                 <label className="chk"><input type="checkbox" checked={probesOn} onChange={(e) => setProbesOn(e.target.checked)} disabled={running} /> probes</label>
+                <label
+                  className="chk"
+                  title={
+                    opaUp === null ? "OPA reachability unknown"
+                      : opaUp ? "OPA reachable — state-changing actions are policy-gated"
+                      : "OPA unreachable — gate would fail closed and block the intervention. Run: docker compose up -d opa"
+                  }
+                >
+                  <input type="checkbox" checked={policyOn} onChange={(e) => setPolicyOn(e.target.checked)} disabled={running} /> policy
+                  {opaUp === false && <span className="chkHint"> · OPA down</span>}
+                </label>
+                <label className="chk"><input type="checkbox" checked={executeRollback} onChange={(e) => setExecuteRollback(e.target.checked)} disabled={running} /> execute</label>
                 <label className="chk"><input type="checkbox" checked={replay} onChange={(e) => setReplay(e.target.checked)} disabled={running} /> replay</label>
                 <button className="btn primary btnInvestigate" onClick={start} disabled={running || !incident}>
                   <IconPlay />
@@ -485,6 +659,177 @@ export default function App() {
                           </div>
                         )}
                         {gate && <div className="gated">⛔ {gate.action} gated — awaiting explicit approval (never auto-fired)</div>}
+                      </div>
+                    )}
+                  </div>
+                </section>
+
+                {/* Customer Impact — CIS routing (Sep 16) */}
+                <section className="card cis">
+                  <h2>Customer Impact <span className="hbadge">CIS</span></h2>
+                  <div className="body">
+                    {!customerImpact && <div className="idle">no customer_impact block on this incident</div>}
+                    {customerImpact && (
+                      <div className="cisWrap">
+                        <div className={`cisScore urg-${customerImpact.cis_score >= 80 ? "critical" : customerImpact.cis_score >= 55 ? "high" : customerImpact.cis_score >= 30 ? "moderate" : "low"}`}>
+                          <div className="cisNum">{Math.round(customerImpact.cis_score)}</div>
+                          <div className="cisLbl">
+                            {customerImpact.cis_score >= 80 ? "CRITICAL" : customerImpact.cis_score >= 55 ? "HIGH" : customerImpact.cis_score >= 30 ? "MODERATE" : "LOW"}
+                          </div>
+                        </div>
+                        <div className="cisMeta">
+                          <div className="cisRow"><span>tier</span><b>{customerImpact.tier || "unspec"}</b></div>
+                          <div className="cisRow"><span>affected users</span><b>{customerImpact.affected_users.toLocaleString()}</b></div>
+                          <div className="cisRow"><span>SLA breach</span><b>{customerImpact.sla_breach ? "yes" : "no"}</b></div>
+                          <div className="cisRow"><span>revenue path</span><b>{customerImpact.revenue_tagged_service ? "yes" : "no"}</b></div>
+                          <div className="cisSource">{customerImpact.impact_source}</div>
+                          <div className="cisNote">
+                            Routing-only — CIS never touches the diagnostic path.
+                            <br/>Guardrail proven at build time (static AST audit).
+                          </div>
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                </section>
+
+                {/* Policy Decisions — OPA + Rego (Sep 12-13) */}
+                <section className="card policy">
+                  <h2>Policy Engine <span className="hbadge">OPA · Rego</span></h2>
+                  <div className="body">
+                    {!policyDecisions.length && <div className="idle">
+                      {policyOn ? "no state-changing action reached the gate yet" : "policy mode OFF — legacy gate flow"}
+                    </div>}
+                    {policyDecisions.map((pd, i) => (
+                      <div key={i} className={`policyRow ${pd.allow ? "allow" : "deny"}`}>
+                        <div className="policyHead">
+                          <span className={`pill ${pd.allow ? "pill-healthy" : "pill-critical"}`}>
+                            <span className="dot" style={{ background: pd.allow ? "var(--cisco-status-healthy)" : "var(--cisco-status-critical)" }} />
+                            {pd.allow ? "ALLOW" : "DENY"}
+                          </span>
+                          <span className="policyAction">{pd.action}</span>
+                          {!pd.engine_available && <span className="pill pill-warn">engine unreachable — fail-closed</span>}
+                        </div>
+                        {pd.description && <div className="policyDesc">{pd.description}</div>}
+                        {pd.reasons.length > 0 && (
+                          <div className="policyReasons">
+                            {pd.reasons.map((r, j) => (<span key={j} className="reasonPill">{r}</span>))}
+                          </div>
+                        )}
+                      </div>
+                    ))}
+                    {actionBlocked && (
+                      <div className="actionBlocked">
+                        ⛔ Action blocked: <b>{actionBlocked.action}</b>
+                        <div className="reasonList">
+                          {actionBlocked.reasons.map((r, i) => (<span key={i} className="reasonPill">{r}</span>))}
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                </section>
+
+                {/* Verification — post-intervention recovery check (Sep 15) */}
+                <section className="card verify">
+                  <h2>Verification Loop <span className="hbadge">recovery check</span></h2>
+                  <div className="body">
+                    {!verification && !verifying && <div className="idle">no intervention run yet</div>}
+                    {verifying && <div className="verifying">▸ verifying recovery signal…</div>}
+                    {verification && (
+                      <div className={`verifyResult ${verification.recovered ? "ok" : "fail"}`}>
+                        <div className="verifyHead">
+                          <span className={`pill ${verification.recovered ? "pill-healthy" : "pill-critical"}`}>
+                            <span className="dot" style={{ background: verification.recovered ? "var(--cisco-status-healthy)" : "var(--cisco-status-critical)" }} />
+                            {verification.recovered ? "RECOVERED" : "NOT RECOVERED"}
+                          </span>
+                          <span className="verifySignal">{verification.signal}</span>
+                        </div>
+                        <div className="verifyValues">
+                          <span>baseline <b>{verification.baseline_value ?? "n/a"}</b></span>
+                          <span>post <b>{verification.post_intervention_value ?? "n/a"}</b></span>
+                          <span>band ≤ <b>{verification.recovery_band?.max ?? "n/a"}</b></span>
+                        </div>
+                        {verification.reasoning && <div className="verifyWhy">{verification.reasoning}</div>}
+                        {verification.synthesised && <div className="verifyNote">synthesised from ground truth (no explicit block)</div>}
+                      </div>
+                    )}
+                    {autoRevert && (
+                      <div className="autoRevert">
+                        ↩ Auto-revert triggered: {autoRevert.reason}
+                        {autoRevert.safety_envelope && (
+                          <div className="envelope">
+                            envelope: {autoRevert.safety_envelope.max_traffic_pct}% traffic ·
+                            {autoRevert.safety_envelope.max_duration_s}s ·
+                            auto-revert {String(autoRevert.safety_envelope.auto_revert)}
+                          </div>
+                        )}
+                      </div>
+                    )}
+                  </div>
+                </section>
+
+                {/* Target Service — real HTTP execution against mock (Sep 22) */}
+                <section className="card target">
+                  <h2>Target Service <span className="hbadge">execution</span></h2>
+                  <div className="body">
+                    {!targetPre && !rollbackExec && (
+                      <div className="idle">
+                        target service not reachable — start `mock/shop_svc.py` on :9000 to see it react
+                      </div>
+                    )}
+                    {targetPre && (
+                      <div className="targetRow">
+                        <div className={`targetSide ${targetPost ? "was" : "cur"}`}>
+                          <div className="targetLbl">{targetPost ? "before" : "current state"}</div>
+                          <div className="targetVer">{targetPre.version}</div>
+                          <div className="targetMetric">
+                            <span className="mLbl">5xx</span>
+                            <b className={(targetPre.error_rate > 0.1) ? "hot" : ""}>
+                              {(targetPre.error_rate * 100).toFixed(1)}%
+                            </b>
+                          </div>
+                          <div className="targetMetric">
+                            <span className="mLbl">p95</span>
+                            <b className={(targetPre.p95_ms > 1000) ? "hot" : ""}>
+                              {targetPre.p95_ms} ms
+                            </b>
+                          </div>
+                          <div className="targetReason">{targetPre.reason}</div>
+                        </div>
+                        {targetPost && (
+                          <>
+                            <div className="targetArrow">→</div>
+                            <div className="targetSide now">
+                              <div className="targetLbl">after rollback</div>
+                              <div className="targetVer">{targetPost.version}</div>
+                              <div className="targetMetric">
+                                <span className="mLbl">5xx</span>
+                                <b className={(targetPost.error_rate > 0.1) ? "hot" : "cool"}>
+                                  {(targetPost.error_rate * 100).toFixed(1)}%
+                                </b>
+                              </div>
+                              <div className="targetMetric">
+                                <span className="mLbl">p95</span>
+                                <b className={(targetPost.p95_ms > 1000) ? "hot" : "cool"}>
+                                  {targetPost.p95_ms} ms
+                                </b>
+                              </div>
+                              <div className="targetReason">{targetPost.reason}</div>
+                            </div>
+                          </>
+                        )}
+                      </div>
+                    )}
+                    {rollbackExec?.kind === "started" && (
+                      <div className="execLine started">▸ real HTTP POST → {rollbackExec.target}/shop/rollback</div>
+                    )}
+                    {rollbackExec?.kind === "executed" && (
+                      <div className="execLine executed">✓ rollback executed against {rollbackExec.target}</div>
+                    )}
+                    {rollbackExec?.kind === "failed" && (
+                      <div className="execLine failed">
+                        ⛔ target unreachable — {rollbackExec.error}
+                        <div className="execNote">mechanism unaffected — recorded honestly in the audit trail</div>
                       </div>
                     )}
                   </div>

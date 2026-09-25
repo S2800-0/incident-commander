@@ -1,0 +1,108 @@
+# Incident Commander — local stack.
+#
+# One command spins the pieces the demo needs. This file grows as we add real
+# infra (Redis for the gate, Cassandra for the evidence chain, NiFi for OTLP
+# ingestion). Right now it's OPA + the FastAPI backend — the smallest thing
+# that proves the policy-gated architecture actually runs end-to-end.
+#
+#   docker compose up          # start OPA (and backend once uncommented)
+#   docker compose up opa      # start just OPA (useful while iterating locally)
+#   docker compose down        # stop everything
+#
+# Env overrides the Python client reads (see ic/policy.py):
+#   IC_OPA_URL       default http://localhost:8181
+#   IC_OPA_TIMEOUT_S default 2.0
+
+services:
+
+  # -------------------------------------------------------------------------
+  # OPA — policy engine. Loads .rego files from ./policy (mounted read-only)
+  # and serves the Data API on :8181. Rego v1 is the default from OPA 1.0+.
+  # -------------------------------------------------------------------------
+  opa:
+    # `-static` variant is multi-arch (amd64 + arm64). The plain `:1.4.0` tag
+    # is amd64-only and crashes under Rosetta on Apple Silicon.
+    image: openpolicyagent/opa:1.4.0-static
+    container_name: ic-opa
+    command:
+      - "run"
+      - "--server"
+      - "--addr=0.0.0.0:8181"
+      - "--log-level=info"
+      - "--set=decision_logs.console=true"   # every decision logged for audit
+      - "/policy"
+    ports:
+      - "8181:8181"
+    volumes:
+      - ./policy:/policy:ro
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:8181/health?bundles=true"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 5s
+    restart: unless-stopped
+
+  # -------------------------------------------------------------------------
+  # NiFi — real Apache NiFi as the OTLP ingestion adapter. Documents the
+  # production pattern: multiple telemetry producers → NiFi intake → IC.
+  # Optional for the demo — the corpus bridge (demo/otlp_bridge.py) posts
+  # directly to IC and works without NiFi. Bring NiFi up when demonstrating
+  # the flow-based ingestion story:
+  #     docker compose --profile ingestion up -d nifi
+  # UI at https://localhost:8443/nifi/ (self-signed cert).
+  # -------------------------------------------------------------------------
+  nifi:
+    image: apache/nifi:latest
+    container_name: ic-nifi
+    profiles: ["ingestion"]
+    environment:
+      SINGLE_USER_CREDENTIALS_USERNAME: admin
+      SINGLE_USER_CREDENTIALS_PASSWORD: "ic-hackathon-demo-password"  # local demo only
+      NIFI_WEB_HTTPS_PORT: "8443"
+    ports:
+      - "8443:8443"      # UI (https)
+      - "9091:9091"      # ListenHTTP port — demo bridge POSTs OTLP here
+    volumes:
+      - nifi_data:/opt/nifi/nifi-current/logs
+      - ./nifi:/opt/nifi/samples:ro
+    restart: unless-stopped
+
+  # -------------------------------------------------------------------------
+  # Backend — currently runs on the host (uvicorn), so this stanza is
+  # commented out. Uncomment when we containerise it (Sep 20+, after the
+  # Cassandra/Redis wire-up lands).
+  # -------------------------------------------------------------------------
+  # backend:
+  #   build: .
+  #   container_name: ic-backend
+  #   environment:
+  #     IC_OPA_URL: http://opa:8181
+  #   ports:
+  #     - "8000:8000"
+  #   depends_on:
+  #     opa:
+  #       condition: service_healthy
+  #   restart: unless-stopped
+
+  # -------------------------------------------------------------------------
+  # shop-svc — the target checkout-service that Incident Commander acts on.
+  # Small FastAPI mock exposing GET /shop/health and POST /shop/rollback.
+  # Runs on host uvicorn by default (see mock/shop_svc.py header) — this
+  # compose entry lets you run it inside Docker instead when convenient.
+  # -------------------------------------------------------------------------
+  # shop-svc:
+  #   image: python:3.12-slim
+  #   container_name: ic-shop-svc
+  #   working_dir: /app
+  #   command: >
+  #     sh -c "pip install --quiet fastapi uvicorn pydantic &&
+  #            uvicorn mock.shop_svc:app --host 0.0.0.0 --port 9001 --log-level warning"
+  #   ports:
+  #     - "9001:9001"
+  #   volumes:
+  #     - .:/app:ro
+  #   restart: unless-stopped
+
+volumes:
+  nifi_data:

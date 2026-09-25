@@ -8,6 +8,7 @@ dependencies = [
     "cryptography>=42.0",
     "fastapi>=0.110",
     "uvicorn[standard]>=0.29",
+    "httpx>=0.27",   # live mode: target-service client, OTLP export, load generator
 ]
 
 [project.optional-dependencies]
@@ -15,10 +16,11 @@ dependencies = [
 # and the whole ablation/demo run without it. The Anthropic SDK also drives OpenRouter's
 # Anthropic-compatible /messages endpoint, so one dep covers both providers.
 llm = ["anthropic>=0.40", "python-dotenv>=1.0"]
+dev = ["pytest>=8"]
 
 [build-system]
 requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools]
-packages = ["ic", "ic.agents", "server"]
+packages = ["ic", "ic.agents", "ic.live", "server"]

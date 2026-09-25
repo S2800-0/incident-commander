@@ -23,8 +23,23 @@ postmortem*.json
 replays/
 keys/
 *.log
+
+# live mode — local binaries and per-run outputs
+tools/
+live_runs/
 .DS_Store
 
 # internal demo prep — never commit (personal narration / rehearsal notes)
 demo/DEMO_SCRIPT.md
 demo/QA_PREP.md
+demo/DEMO_SCRIPT.pdf
+
+# stray / local clutter — not part of the project
+demo/.Rhistory
+*.Rhistory
+demo/Incident_Commander_Template.pptx
+demo/*.pptx.bak
+demo/*.pre-*.bak
+
+# Trial results and generated postmortems — reproduce with `python -m ic.live_trials`
+results/
