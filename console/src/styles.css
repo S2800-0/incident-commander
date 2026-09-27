@@ -917,6 +917,26 @@ input, select { font: inherit; }
 .lv-env h2 { text-transform: none; letter-spacing: 0; }
 .lv-env .body p { margin: 0 0 10px; max-width: 80ch; }
 .lv-envRow { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 8px; }
+.btn.btn-injecting {
+  background: #fff4d6;
+  border-color: #d4a017;
+  color: #7a5f00;
+  font-weight: 600;
+  position: relative;
+}
+.btn.btn-injecting::after {
+  content: "";
+  position: absolute;
+  left: 0; right: 0; bottom: 0;
+  height: 2px;
+  background: linear-gradient(90deg, transparent, #d4a017, transparent);
+  background-size: 200% 100%;
+  animation: btn-injecting-slide 1.2s linear infinite;
+}
+@keyframes btn-injecting-slide {
+  from { background-position: 200% 0; }
+  to   { background-position: -200% 0; }
+}
 .btn.btn-reset {
   margin-left: auto;
   background: #0e326e;
@@ -935,3 +955,85 @@ input, select { font: inherit; }
 }
 .btn.btn-load-on:hover:not(:disabled) { background: #0f8f5b; border-color: #0f8f5b; }
 .btn.btn-load-on::before, .btn.btn-load-off::before { content: ""; }
+
+/* ── mini demo terminals (LIVE tab) ─────────────────────────────────── */
+.lv-terminals { margin-top: 12px; }
+.lv-termHead {
+  font-family: "SF Mono", "JetBrains Mono", Menlo, monospace;
+  font-size: 11px;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--cisco-text-muted, #64748b);
+  margin-bottom: 10px;
+}
+.lv-termGrid {
+  display: grid;
+  grid-template-columns: 1.15fr 1fr;
+  gap: 12px;
+}
+@media (max-width: 900px) {
+  .lv-termGrid { grid-template-columns: 1fr; }
+}
+.lv-term {
+  background: #0B1220;
+  border: 1px solid #1E293B;
+  border-radius: 10px;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+}
+.lv-termTitle {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  background: #131C30;
+  border-bottom: 1px solid #1E293B;
+  color: #94A3B8;
+  font-family: "SF Mono", "JetBrains Mono", Menlo, monospace;
+  font-size: 12px;
+}
+.lv-termDot {
+  width: 8px; height: 8px; border-radius: 50%;
+  box-shadow: 0 0 8px currentColor;
+}
+.lv-termDot--green { background: #22C55E; color: #22C55E; animation: term-pulse 1.6s ease-in-out infinite; }
+.lv-termDot--blue  { background: #3B82F6; color: #3B82F6; }
+@keyframes term-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.35; }
+}
+.lv-termRun {
+  margin-left: auto;
+  padding: 3px 12px;
+  border: 1px solid #3B82F6;
+  border-radius: 6px;
+  background: #3B82F6;
+  color: #fff;
+  font-family: inherit;
+  font-size: 12px;
+  cursor: pointer;
+  font-weight: 600;
+  transition: background 0.15s ease;
+}
+.lv-termRun:hover:not(:disabled) { background: #2563EB; border-color: #2563EB; }
+.lv-termRun:disabled { opacity: 0.55; cursor: not-allowed; }
+.lv-termBody {
+  padding: 12px 14px;
+  min-height: 220px;
+  max-height: 260px;
+  overflow-y: auto;
+  font-family: "SF Mono", "JetBrains Mono", Menlo, monospace;
+  font-size: 12px;
+  line-height: 1.55;
+  color: #7ddea8;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.lv-termBody > div { min-height: 1em; }
+.lv-termMuted { color: #64748B; font-style: italic; }
+.lv-termErr { color: #F87171; }
+.lv-termDot--amber { background: #F59E0B; color: #F59E0B; }
+.lv-term--wide { grid-column: 1 / -1; margin-top: 12px; }
+.lv-termBody--tall { min-height: 320px; max-height: 400px; color: #cfe6ff; }
+.lv-termBody--tall > div { white-space: pre-wrap; font-family: inherit; }

@@ -260,3 +260,34 @@ def live_mode(body: dict) -> dict:
     except ValueError as e:
         raise HTTPException(422, str(e))
     return {"mode": live.mode}
+
+
+# ============================================================================
+# Demo helper — runs `python -m ic.live_trials` as a subprocess and streams
+# stdout back to the console so the judge can watch the 63-trial harness
+# run without leaving the browser. This is purely UI convenience — the
+# harness itself is the source of truth (ic/live_trials.py).
+# ============================================================================
+import subprocess as _subprocess
+import sys as _sys
+from pathlib import Path as _Path
+
+@app.post("/demo/run_trials")
+def demo_run_trials() -> dict:
+    """Execute the 63-trial harness once, return stdout as a single string."""
+    repo = _Path(__file__).resolve().parent.parent
+    try:
+        r = _subprocess.run(
+            [_sys.executable, "-m", "ic.live_trials"],
+            cwd=str(repo), capture_output=True, text=True, timeout=60,
+        )
+        return {
+            "ok": r.returncode == 0,
+            "returncode": r.returncode,
+            "stdout": r.stdout,
+            "stderr": r.stderr[-2000:] if r.stderr else "",
+        }
+    except _subprocess.TimeoutExpired:
+        return {"ok": False, "returncode": -1, "stdout": "", "stderr": "timeout after 60s"}
+    except Exception as e:
+        return {"ok": False, "returncode": -1, "stdout": "", "stderr": str(e)}

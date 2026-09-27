@@ -1,226 +1,245 @@
+<div align="center">
+
 # Incident Commander
 
-A multi-agent SRE system that performs **active differential diagnosis** on production
-incidents.
+**An autonomous SRE agent that decides when *not* to act.**
 
-The one idea: when competing root-cause hypotheses are close in likelihood, the system
-does **not** guess and does **not** just show both. It identifies the single unobserved
-signal that would settle the argument, fetches exactly that signal (a **probe**),
-eliminates a hypothesis, reports a **calibrated** confidence, and seals its reasoning
-into a **cryptographically verifiable** artifact.
+Bayesian belief updating for probe selection · OPA policy engine outside the agent · Merkle-signed evidence chain · offline-verifiable postmortems.
 
-The proof is an **ablation**: run each labeled incident twice — probes **ON** vs **OFF**.
+[Quickstart](#quickstart) · [What it does](#what-it-does) · [How the mechanism works](#how-the-mechanism-works) · [Architecture](#architecture) · [Roadmap](#roadmap)
 
-```
-★ HEADLINE — top-1 accuracy on {ambiguous, adversarial_redherring}
-    probes ON : 100%
-    probes OFF:   0%
-    Δ         : +100%
-
-False-positive rollback (adversarial):  OFF 100%  →  ON 0%
-Brier score (lower better):             OFF 0.362 →  ON 0.004
-```
-
-> Numbers are illustrative, not publication-grade. The headline is the
-> **sign and size of the delta**, reproducible offline in one command.
-
-**VoI framing.** This prototype implements the Value-of-Information decision policy over
-the observation half of the mixed action space specified in our design document. The
-intervention primitive is defined and safety-bounded; its live execution is Phase 2 of
-our roadmap. What runs here is the mechanism that decides when an intervention would be
-justified — which is the research contribution. Every candidate next action carries a
-computed VoI score (EIG − λ·cost − μ·risk); the selector picks argmax over executable
-actions, and the console's VoI panel shows the whole ranking live — including why the
-intervention *would* have been chosen if it were executable.
+</div>
 
 ---
 
-## Two modes
+## What it does
 
-| | **Replay mode** | **Live mode** |
+Incident Commander is a decision layer above your observability stack. It watches telemetry from a target service, opens an incident autonomously when SLOs are breached, and runs a formal loop to decide what to do next:
+
+1. **Investigate** — competing root-cause hypotheses, scored by expected information gain per unit cost
+2. **Ask** — a policy engine outside the agent decides whether the proposed action is allowed
+3. **Act** — only after policy approval, over real HTTP against the target service
+4. **Verify** — from fresh telemetry collected *after* the action, not the pre-action signal
+5. **Auto-revert** — if verification fails, the agent undoes its own change
+6. **Seal** — every decision is a leaf in a Merkle tree, signed with Ed25519, offline-verifiable
+
+The condition for autonomy is **reversibility, not confidence**. Irreversible actions never run.
+
+## Why
+
+Most AI SRE tools show an agent fixing something. This project shows an agent **refusing to act** when the proposed action is unsafe — and proving it was right to refuse.
+
+Enterprise DevOps teams cannot deploy autonomous incident response until three things are true simultaneously:
+- The agent can act on the same interfaces production actually exposes (HTTP + OpenTelemetry)
+- Every action is gated by a policy the agent cannot bypass
+- Every decision produces a receipt a third party can verify without trusting the operator
+
+Incident Commander shows all three end-to-end.
+
+## Quickstart
+
+**Requirements:** Docker Desktop, Python 3.11+, Node 18+.
+
+```bash
+git clone https://github.com/S2800-0/incident-commander.git
+cd incident-commander
+pip install -e .
+```
+
+Then double-click `start.command` from Finder (macOS), or run:
+
+```bash
+./start.command
+```
+
+This launches, each in its own Terminal tab:
+
+- OPA policy engine (Docker container, port 8181)
+- Backend orchestrator + SLO detector (FastAPI on port 8000)
+- Target service — the mock `shop-svc` (FastAPI on port 9001)
+- Console (React + Vite on port 5173)
+
+The console opens automatically in your browser. On the **Live** tab, click **▶ Start traffic (60 rps)**, then click any fault-injection scenario to watch the pipeline fire.
+
+To stop everything cleanly: `./stop.command`.
+
+## Try it
+
+Once the console is open, four chaos scenarios exercise the four outcome patterns:
+
+| Scenario | Expected outcome | What it proves |
 |---|---|---|
-| Input | 12 authored incident bundles | a running service's real OTLP telemetry |
-| Incident starts | you pick a bundle | an SLO breach, detected automatically |
-| Hypotheses | seeded in the bundle | generated from observed context (deploy log, dependencies) |
-| Probe selection | divergence ÷ cost heuristic | Bayesian beliefs + Shannon expected information gain (nats) |
-| Evidence | pre-authored probe results | live telemetry queries and a real, policy-gated traffic split |
-| Actions | recommended; human gate | executed autonomously when OPA allows; denied otherwise |
-| Verification | fixture / ground truth | fresh telemetry after the action; auto-revert on failure |
-| Purpose | deterministic ablation (the proof) | the system operating end to end |
+| **Bad code release** | Autonomous rollback → verified recovery | Reversible actions execute end-to-end |
+| **Config release + hidden dependency** | Rollback → verification fails → auto-revert → escalate | The system undoes its own action when the fix doesn't hold |
+| **Two dependencies degrade together** | Abstain → escalate | Refusing when evidence cannot separate causes is a designed output |
+| **orders-db saturation** | Failover proposed → **OPA DENY** → escalate | Irreversible actions are denied before they can execute |
 
-Replay mode is unchanged by live mode and still reproduces the numbers below exactly.
+Each scenario completes in 15-30 seconds. Between runs, click **⟲ Reset environment**.
 
-## Live mode
+## How the mechanism works
 
-```bash
-pip install -e .                            # + OPA 1.4 binary at tools/opa(.exe), on PATH, or docker compose up -d opa
-python -m demo.live_stack                   # OPA :8181, IC :8000, checkout-service :9001, 60 rps load, console :5173
-# open http://127.0.0.1:5173 → Live tab, wait ~45 s for a clean baseline, then break something:
-curl -X POST http://127.0.0.1:9001/chaos/scenario/bad_deploy
+### Bayesian belief updating
+
+Each hypothesis about the root cause carries a probability. When a probe returns evidence, the system compares the observation against what each hypothesis predicted:
+
+- Predictions that matched → posterior probability **up**
+- Predictions that mismatched → hypothesis **eliminated**
+
+There is no learned model — the policy is deterministic Bayesian updating over structured hypothesis predictions. Same input, same output. Anyone can audit the logic by reading the code.
+
+### Value-of-Information probe selection
+
+Not every check is worth running. The system scores each candidate probe by expected information gain divided by cost, and picks the argmax over probes that haven't run yet. The stop rule is: continue while uncertainty remains **and** a discriminating check still exists.
+
+```
+next_check = argmax( expected_information_gain / cost )
 ```
 
-What happens next involves no clicks: the detector opens an incident from the 5xx
-breach; hypotheses are generated; probes are chosen by expected information gain per
-second; OPA decides every state-changing action (an interventional canary, the
-remediation, any revert) and each decision is sealed into the incident's evidence chain;
-the remediation runs against the service; recovery is judged only from telemetry
-collected after the action; a failed remediation is reverted automatically.
+Zero LLM tokens in the decision path.
 
-Four environment scenarios exercise each branch of the autonomy model:
+### Policy-as-code outside the agent
 
-| scenario (`/chaos/scenario/…`) | what is really broken | designed outcome |
+Every state-changing action is gated by an [OPA](https://www.openpolicyagent.org/) engine running in its own Docker container, on its own port, with policies written in Rego. The backend calls OPA over HTTP with a policy input document. The agent has no code path to write or bypass these rules; if OPA is unreachable, the backend fails closed.
+
+Three action classes exist: rollback, canary, and intervention. Each is gated by different envelope constraints (blast radius, reversibility, traffic percentage, duration).
+
+### Merkle + Ed25519 evidence chain
+
+Every decision — SLO breach, probe result, policy verdict, action outcome, verification result — is a leaf in a Merkle tree. The root is signed with Ed25519 over `(verdict || root || timestamp)`. A standalone verifier reads only the sealed postmortem file:
+
+```bash
+python verify.py results/LIVE-0073.postmortem.json
+# → VERIFIED · exit 0
+```
+
+Tamper with any leaf, the same script prints `TAMPERED · exit 1`.
+
+## Architecture
+
+```
+Live service (mock shop-svc)
+        │  OpenTelemetry
+        ▼
+SLO detector  ──▶  Investigation loop  ──▶  Policy engine (OPA, outside agent)
+                          │                          │
+                          │                       ALLOW / DENY
+                          │                          │
+                          ▼                          ▼
+                   Sealed evidence  ◀── Execute action (real HTTP)
+                          │                          │
+                          │                          ▼
+                          │                    Verification
+                          │                          │
+                          ▼                          ▼
+                    Merkle + Ed25519 audit chain (verify.py)
+```
+
+Ten engine modules · 15 unit tests · 14 policy tests · 63 end-to-end trials across five outcome patterns.
+
+### Repository layout
+
+```
+ic/                 orchestrator, policy client, evidence chain, verify.py
+├── live/           SLO detector, live controller, verification, probes
+└── live_trials.py  63-trial harness across five outcome patterns
+
+mock/               target service (shop-svc) + load generator
+server/             FastAPI backend (orchestrator + REST + WebSocket)
+console/            React + Vite console (LIVE tab + Console tab)
+deck/               presentation deck (static HTML, self-contained)
+policy/             Rego policies
+
+corpus/             12 recorded incident bundles (replay mode)
+tests/              pytest suites for orchestrator + policy + live loop
+
+start.command       one-click startup (macOS Finder-double-click)
+stop.command        one-click shutdown
+```
+
+## Evidence
+
+Two levels of proof exist beyond a single demo run:
+
+**Ablation** — turn the mechanism off and measure the collapse:
+```
+                            ON     OFF
+Accuracy on hardest cases  100%    0%
+False-positive rollbacks     0%   33%
+Brier score               0.004  0.287
+```
+
+`OFF` scores 0% (not 50%) because the discriminating signal is reachable only through a check. Turn checks off and it is genuinely gone — the ablation measures the policy, not the model.
+
+**63-trial harness** — five outcome patterns, all end-to-end through the same code:
+
+```bash
+python -m ic.live_trials
+```
+
+Results:
+- Confirmed → acted → verified: **25 / 25**
+- Won by exclusion → verification caught → reverted: **10 / 10**
+- Reversible non-rollback action proposed: **9 / 9**
+- Evidence insufficient → abstained: **5 / 5**
+- Irreversible action proposed → policy denied: **14 / 14**
+
+**Ours vs. exhaustive baseline (same 25 confirmed trials):**
+| | Ours | Exhaustive |
 |---|---|---|
-| `bad_deploy` | code defect in the new release | canary confirms → rollback **ALLOW** → verified **RESOLVED** |
-| `config_regression_hidden_dependency` | uninstrumented payment-gateway; the config release is a coincidence | rollback allowed by exclusion → verification **fails** → **auto-revert** → escalate |
-| `correlated_dependency_degradation` | both dependencies degrade together | evidence cannot separate causes → **abstain** → escalate, no action |
-| `database_saturation` | orders-db saturation | diagnosis confirmed → DB failover **DENY** (irreversible) → escalate |
+| Resolution rate | 100% | 100% |
+| Probes per incident | 1.2 | 2.8 |
+| Harmful actions | 0 | 0 |
+| Unreverted changes | 0 | 0 |
 
-Measure it (ground truth lives only in the runner, never in Incident Commander):
+Same accuracy at 43% of the probing cost.
 
-```bash
-python -m demo.live_experiment --reps eig=5,exhaustive=3,no_probes=3
-python -m ic.roi --live live_runs/experiment_latest.json
-tools/opa.exe test policy/ -v                # policy unit tests
-python -m pytest tests -q                    # live engine unit tests
-```
+## Stack
 
-Live mode's honest limits: the target is a simulated service on one host (every request,
-metric, decision and action is real, but the fault shapes and 60 rps load are synthetic);
-the hypothesis space is template-generated from four failure shapes, so a cause outside it
-is caught only by verification; and the latency thresholds are tuned to this service.
+- **Python 3.11+ · FastAPI · uvicorn · httpx** — backend and target service
+- **Open Policy Agent + Rego** — external policy engine (Docker sidecar)
+- **OpenTelemetry** — telemetry ingestion format
+- **React · Vite · TypeScript** — console
+- **cryptography** — Ed25519 signatures
+- **pytest** — unit and integration tests
 
----
+No LLM in the decision path. LLM support exists as an opt-in triage assist behind a two-check anti-hallucination filter (`IC_USE_LLM=1`), but the metrics above are produced without it.
 
-## Quickstart (replay mode)
+## Roadmap
 
-```bash
-pip install -e .                 # pydantic, cryptography, fastapi, uvicorn
+**Shipped:**
+- Investigation loop with Value-of-Information probe selection
+- OPA + Rego policy engine, running outside the agent
+- Verification loop with recovery band and auto-revert
+- Customer Impact Scoring (P0–P3)
+- OpenTelemetry ingestion + SLO breach detector (with hysteresis)
+- 63-trial end-to-end harness across five outcome patterns
+- Real HTTP execution against a live target service
+- Merkle + Ed25519 audit chain, offline verifier
+- Probe catalog expansion — VoI 1.2 vs exhaustive 2.8 probes per incident
 
-# 1. The proof — run the ablation
-python -m ic.harness             # prints the table, writes harness_results.json
+**Planned:**
+- Formal Expected Information Gain under Shannon entropy (currently a divergence heuristic)
+- Kubernetes adapter — replace `mock/shop_svc.py` with a real `kubectl` integration
+- Wider policy corpus — compliance, data residency, multi-tenant scoping
+- Multi-region deployment with per-region SLO detectors
+- Datadog / Grafana / Prometheus telemetry adapters
 
-# 2. The demo path — seal a postmortem, then verify it offline
-python -m ic.investigate INC-4471 -o postmortem.json
-python verify.py postmortem.json          # → VERIFIED ✅
-#   edit one evidence byte …
-python verify.py postmortem_tampered.json # → TAMPERED ❌
+## Documentation
 
-# 3. The console
-python -m server.app             # records replays/  (one-time)
-uvicorn server.app:app --port 8000
-cd console && npm install && npm run dev  # → http://localhost:5173
-```
+- [`docs/SRS.md`](docs/SRS.md) — Software Requirements Specification with traceability
+- [`docs/RAI.md`](docs/RAI.md) — Responsible AI governance and safety
+- [`docs/ROI.md`](docs/ROI.md) — Business impact and value tiers
+- [`docs/ROADMAP.md`](docs/ROADMAP.md) — Detailed roadmap
+- [`docs/SUSTAINABILITY.md`](docs/SUSTAINABILITY.md) — Waste-reduction metrics
 
-Open the console, pick `INC-4471`, hit **Investigate**: two agents disagree, ambiguity
-trips, `P_conn_wait` is selected, H2 collapses, H1 lands ~94%, the evidence chain seals.
-The **Ablation & Calibration** tab renders the delta bars and reliability diagram.
+## Contributing
 
----
+Issues and pull requests welcome. The project follows conventional commits and standard pytest discipline. Run `pytest` before opening a PR.
 
-## How it works
+## License
 
-```
-triage ── seeds the competing hypotheses (H1 vs H2)
-   │
-   ├─ change_agent    (deploy-biased)   ─┐
-   ├─ telemetry_agent (signal-biased)   ─┤ each scores the hypotheses it owns
-   └─ history_agent   (pattern-biased)  ─┘ from prior evidence only
-   │
-adjudicator ── softmax → posteriors → top-2 margin
-   │            margin < τ  OR  leader wants an irreversible rollback?
-   │                 │ yes
-   ▼                 ▼
-conclude        probe loop:  select_probe (max info-gain / cost)
-                             → run_probe (the ONLY path to the discriminator)
-                             → re-score (confirm ↑ / contradict ↓ & eliminate)
-                             → back to adjudicator   (bounded K=4, T=45s, τ=0.15)
-   │
-verdict → Merkle-root the cited evidence → Ed25519-sign → postmortem.json
-```
+MIT — see `LICENSE`.
 
-**The invariant (load-bearing):** the discriminating signal lives only in
-`evidence.probeable`, reachable solely through `Bundle.run_probe`. Setting
-`probes_enabled=False` makes that path dead — that is the ablation switch, and it
-genuinely removes the discriminator from every agent's context. That is why probes-off
-scores 0% on the hard slices; if it scored 100%, the discriminator would have leaked
-into `prior` (see `schema/incident_bundle.schema.md`).
+## Authors
 
-**Probe selection is the contribution** (`ic/probe.py`): divergence over an observable =
-number of *distinct* predictions the surviving hypotheses make about it; a probe's
-info-gain = max divergence over the observables it measures; the selector picks
-`argmax(info_gain / cost_ms)`. On INC-4471 it correctly prefers `P_conn_wait`
-(divergence 2) over the plausible-but-useless `P_inv_errors` (divergence 0).
-
-**Deterministic engine vs live LLM.** The offline default is a deterministic analytical
-reasoner (`ic/reasoner.py`) that derives every number from the evidence payloads
-themselves — so the ablation is reproducible and gradeable with no API key. The
-mechanism is identical with a live model.
-
-### Running the agents on a real model (OpenRouter free tier → Claude)
-
-```bash
-pip install -e ".[llm]"          # anthropic SDK + python-dotenv
-cp .env.example .env             # then paste a real key and set IC_USE_LLM=1
-
-# Free-tier iteration key from https://openrouter.ai  (Anthropic-compatible endpoint)
-#   OPENROUTER_API_KEY=sk-or-v1-...   IC_PROVIDER=openrouter_free
-
-# Step 0 — do the free models even keep the JSON contract? Run this FIRST:
-python test_json_contract.py                 # 10/10 → build on it; <7/10 → switch provider
-
-# Then any live investigation uses the model for agent reasoning:
-IC_USE_LLM=1 python -m ic.investigate INC-4471
-```
-
-Everything routes through one choke point, `ic/llm.py::json_call(system, user, schema)`:
-strict JSON validated against a Pydantic model, **one retry, then failover down a
-provider chain** (`openrouter_free → openrouter_pinned → anthropic`) so a flaky free
-model can't corrupt a run. Swapping providers is just `IC_PROVIDER` in `.env` — no agent
-code changes. Iterate free on OpenRouter, pin one free slug for reproducible numbers, do
-the final quality pass on Claude.
-
-Two boundaries keep it honest:
-
-- **The harness always runs deterministic** (`use_llm=False`, hard-coded) — a per-call
-  auto-router would make Brier/accuracy a grab-bag. The graded artifact stays reproducible.
-- **The model only proposes *prior* support.** Probe re-scoring stays deterministic and
-  data-grounded — a weak free model must never override a *measured* signal. On any model
-  failure the agent falls back to the analytical lens, so an investigation never breaks.
-
-> `base_url` gotcha (fixed in `ic/llm.py`): the Anthropic SDK appends `/v1/messages`, so
-> OpenRouter's base must be `https://openrouter.ai/api` (→ `/api/v1/messages`). The
-> intuitive `.../api/v1` doubles to `/api/v1/v1/messages` and 404s.
-
----
-
-## Guardrails (enforced in code, not just prompts)
-
-- Every hypothesis must cite ≥1 resolvable evidence ref, or its posterior is penalised
-  (`orchestrator.py`, anti-hallucination gate).
-- The **adjudicator has no tool access** — it only reconciles structured hypotheses, so
-  evidence text can bias an agent but can never trigger an action.
-- Retrieved evidence enters LLM context as delimited, typed, hashed data
-  (`llm.evidence_block`), never in an instruction position.
-- The probe loop is hard-bounded: `K_MAX_PROBES=4`, `T_WALL_SECONDS=45`, `TAU=0.15`.
-- The only state-changing action (`rollback`) is **gated**: a `gate_pending` event is
-  emitted and it is never auto-fired.
-
----
-
-## Layout
-
-```
-corpus/         provided frozen incidents (INC-4471/4472/4473)
-schema/         the bundle schema (read the "one invariant" section)
-ic/             models, bundle+probe gate, reasoner, agents, adjudicator, probe,
-                orchestrator, evidence_chain, harness, llm, investigate CLI
-server/app.py   FastAPI + WebSocket event stream (+ replay recorder)
-console/        Vite + React + TS single-screen console (Recharts)
-verify.py       standalone offline evidence-chain verifier
-```
-
-## Explicitly out of scope (stubbed, by design)
-
-Real Datadog/Splunk/Jira connectors, SSO/SCIM/RBAC, multi-tenancy, billing, HA, k8s.
-"Vector search" over prior incidents is a keyword match against the corpus, not pgvector.
-These score nothing here and are noted as stubs in code comments.
+Shahesta Salama · Nourseen Tarek · Alryada University

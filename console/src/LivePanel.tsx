@@ -86,6 +86,23 @@ export default function LivePanel() {
   const [resetBusy, setResetBusy] = useState(false);
   const [loadgen, setLoadgen] = useState<{ running: boolean; rps: number } | null>(null);
   const [loadgenBusy, setLoadgenBusy] = useState(false);
+  // which scenario is currently being fired (so ONE button shows "Injecting…"
+  // instead of the whole row going quietly disabled — this is the fix for
+  // "the buttons look idle when I click them")
+  const [injectingId, setInjectingId] = useState<string | null>(null);
+  // Reset clears the incident panel to the empty "Watching…" state so the
+  // last-completed incident stops hanging around. Clicking a history row
+  // or a new incident firing un-clears it.
+  const [cleared, setCleared] = useState<boolean>(false);
+  // ── mini demo terminals ─────────────────────────────────────────────────
+  // Live traffic tail — a rolling log line per sample of the health endpoint.
+  const [trafficLog, setTrafficLog] = useState<string[]>([]);
+  // Curl output — shown when the user hits "▶ run" next to the curl command.
+  const [curlOut, setCurlOut] = useState<{ ts: string; body: string; err?: string } | null>(null);
+  const [curlBusy, setCurlBusy] = useState<boolean>(false);
+  // 63-trial harness output — populated when the user clicks "▶ Run 63 trials".
+  const [trialsOut, setTrialsOut] = useState<{ ts: string; stdout: string; err?: string; ok?: boolean } | null>(null);
+  const [trialsBusy, setTrialsBusy] = useState<boolean>(false);
   const [envBusy, setEnvBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
   const lastSeq = useRef(0);
@@ -122,27 +139,105 @@ export default function LivePanel() {
     return () => { alive = false; clearInterval(a); clearInterval(b); clearInterval(c); clearInterval(d); };
   }, []);
 
+  // ── traffic tail polling ────────────────────────────────────────────────
+  // Every second: summarise the last window of shop-svc traffic as one log
+  // line, prepend it, keep the last 24 lines. Visible in the mini terminal.
+  useEffect(() => {
+    let alive = true;
+    const tick = async () => {
+      try {
+        const [healthR, stateR] = await Promise.all([
+          fetch("/api/shop/health"),
+          fetch("/live/state"),
+        ]);
+        if (!alive || !healthR.ok || !stateR.ok) return;
+        const health: any = await healthR.json();
+        const st: any = await stateR.json();
+        const now = new Date();
+        const ts = `${String(now.getHours()).padStart(2,"0")}:${String(now.getMinutes()).padStart(2,"0")}:${String(now.getSeconds()).padStart(2,"0")}`;
+        const rps = (st.service_health?.rps ?? 0).toFixed(0);
+        const err = ((st.service_health?.error_rate ?? 0) * 100).toFixed(1);
+        const p95 = Math.round(st.service_health?.p95_ms ?? 0);
+        const ver = health.active_version ?? health.version ?? "—";
+        const line = `[${ts}] ${rps.padStart(3)} rps · ${ver.padEnd(8)} · ${err.padStart(5)}% errors · p95 ${p95}ms`;
+        setTrafficLog((prev) => [line, ...prev].slice(0, 24));
+      } catch { /* ignore transient network errors */ }
+    };
+    tick();
+    const t = setInterval(tick, 1000);
+    return () => { alive = false; clearInterval(t); };
+  }, []);
+
+  // ── curl button ─────────────────────────────────────────────────────────
+  async function runCurl() {
+    setCurlBusy(true);
+    try {
+      const r = await fetch("/api/shop/health");
+      const body = JSON.stringify(await r.json(), null, 2);
+      const now = new Date();
+      const ts = `${String(now.getHours()).padStart(2,"0")}:${String(now.getMinutes()).padStart(2,"0")}:${String(now.getSeconds()).padStart(2,"0")}`;
+      setCurlOut({ ts, body });
+    } catch (e: any) {
+      setCurlOut({ ts: "—", body: "", err: String(e) });
+    } finally { setCurlBusy(false); }
+  }
+
+  // ── 63-trial harness button ────────────────────────────────────────────
+  async function runTrials() {
+    setTrialsBusy(true);
+    setTrialsOut(null);
+    try {
+      const r = await fetch("/demo/run_trials", { method: "POST" });
+      const data = await r.json();
+      const now = new Date();
+      const ts = `${String(now.getHours()).padStart(2,"0")}:${String(now.getMinutes()).padStart(2,"0")}:${String(now.getSeconds()).padStart(2,"0")}`;
+      setTrialsOut({ ts, stdout: data.stdout || "", err: data.stderr || undefined, ok: data.ok });
+    } catch (e: any) {
+      setTrialsOut({ ts: "—", stdout: "", err: String(e), ok: false });
+    } finally { setTrialsBusy(false); }
+  }
+
   const active = state?.active_incident?.incident_id as string | undefined;
-  const shownId = active || focus || state?.incidents?.[0]?.incident_id || null;
+  // If Reset has been clicked, show nothing until an incident fires or the
+  // user picks one from history. Otherwise: prefer the actively-investigating
+  // incident, then a manually-picked one from history, then the most recent.
+  const shownId = cleared
+    ? (active || focus || null)
+    : (active || focus || state?.incidents?.[0]?.incident_id || null);
+  // Un-clear the moment a new incident actually starts investigating.
+  useEffect(() => { if (active) setCleared(false); }, [active]);
   const ev = useMemo(() => events.filter((e) => e.incident_id === shownId), [events, shownId]);
   const view = useMemo(() => deriveView(ev), [ev]);
   const record = state?.incidents?.find((r: any) => r.incident_id === shownId);
   const status: string | undefined = active === shownId ? "INVESTIGATING" : (view.closed?.status || record?.status);
 
-  async function inject(path: string) {
+  async function inject(path: string, scenarioId?: string) {
     setEnvBusy(true);
-    try { await fetch(`/api/chaos/${path}`, { method: "POST" }); setFocus(null); } finally { setEnvBusy(false); }
+    if (scenarioId) setInjectingId(scenarioId);
+    try {
+      await fetch(`/api/chaos/${path}`, { method: "POST" });
+      setFocus(null);
+      // keep the "Injecting…" state visible for ~1s so the click feels
+      // responsive even when the API returns fast
+      await new Promise(r => setTimeout(r, 800));
+    } finally {
+      setEnvBusy(false);
+      setInjectingId(null);
+    }
   }
 
-  // Full reset — stops any active chaos scenario AND flips the target service
-  // back to its healthy stable-release baseline. Use this between demo runs so
-  // no residual scenario state contaminates the next one.
+  // ONE reset button. Stops any active chaos scenario, flips the target
+  // service back to healthy v6.09.0, and clears the incident panel so the
+  // last-completed one stops hanging around on screen.
   async function resetToBaseline() {
     setResetBusy(true);
     try {
       await fetch("/api/chaos/clear", { method: "POST" });
       await fetch("/api/shop/reset", { method: "POST" });
       setFocus(null);
+      setCleared(true);   // hides the incident panel until user picks one from history
+      // small pause so the button visibly shows "Resetting…" for a moment
+      await new Promise(r => setTimeout(r, 500));
     } finally { setResetBusy(false); }
   }
 
@@ -386,7 +481,7 @@ export default function LivePanel() {
               <thead><tr><th>incident</th><th>status</th><th>mode</th><th>diagnosis</th><th>probes (wasted)</th><th>remediation</th><th>recovered</th><th>reverted</th><th>closed in</th><th>chain</th></tr></thead>
               <tbody>
                 {state.incidents.map((r: any) => (
-                  <tr key={r.incident_id} className={r.incident_id === shownId ? "sel" : ""} onClick={() => setFocus(r.incident_id)}>
+                  <tr key={r.incident_id} className={r.incident_id === shownId ? "sel" : ""} onClick={() => { setFocus(r.incident_id); setCleared(false); }}>
                     <td><button className="lv-link">{r.incident_id}</button></td>
                     <td><span className={`pill ${statusTone(r.status)}`}>{statusLabel(r.status)}</span></td>
                     <td>{r.mode}</td>
@@ -415,26 +510,106 @@ export default function LivePanel() {
             <p className="lv-muted">Simulates the outside world breaking, through the target service's <code>/chaos</code> API.
               Incident Commander never calls that API and never sees this panel — it only sees the resulting telemetry.</p>
             <div className="lv-envRow">
-              {SCENARIOS.map((s) => (
-                <button key={s.id} className="btn" disabled={envBusy || !!active} onClick={() => inject(`scenario/${s.id}`)} title={s.expect}>{s.label}</button>
-              ))}
-              <button className="btn" disabled={envBusy} onClick={() => inject("clear")}>Clear faults</button>
+              {SCENARIOS.map((s) => {
+                const busy = injectingId === s.id;
+                return (
+                  <button
+                    key={s.id}
+                    className={`btn ${busy ? "btn-injecting" : ""}`}
+                    disabled={envBusy || !!active}
+                    onClick={() => inject(`scenario/${s.id}`, s.id)}
+                    title={s.expect}
+                  >{busy ? `⟳ Injecting ${s.label}…` : s.label}</button>
+                );
+              })}
               <button
                 className={`btn ${loadgen?.running ? "btn-load-on" : "btn-load-off"}`}
                 disabled={loadgenBusy}
                 onClick={toggleLoadgen}
-                title="In-process load generator against /shop/checkout at 60 rps. Without traffic, the SLO detector has nothing to observe."
-              >{loadgenBusy ? "…" : (loadgen?.running ? `⏸ Stop traffic (${loadgen.rps.toFixed(0)} rps)` : "▶ Start traffic (60 rps)")}</button>
+                title="In-process load generator against /shop/checkout. Without traffic, the SLO detector has nothing to observe."
+              >{loadgenBusy ? "⟳ …" : (loadgen?.running ? `⏸ Stop traffic (${loadgen.rps.toFixed(0)} rps)` : "▶ Start traffic (60 rps)")}</button>
               <button
                 className="btn btn-reset"
                 disabled={resetBusy}
                 onClick={resetToBaseline}
-                title="Stop any active fault AND flip the target service back to healthy v6.09.0 baseline"
-              >{resetBusy ? "Resetting…" : "⟲ Reset to baseline"}</button>
+                title="Clears the current fault, flips the target service back to healthy v6.09.0, and closes any open incident panel. Use this between scenarios."
+              >{resetBusy ? "⟳ Resetting…" : "⟲ Reset environment"}</button>
             </div>
-            <div className="lv-muted">injected now: <b>{env?.scenario ?? "none"}</b> · traffic <b>{loadgen?.running ? `${loadgen.rps.toFixed(0)} rps` : "off"}</b>{active ? " · wait for the current incident to close before injecting another" : ""}</div>
+            <div className="lv-muted">
+              injected now: <b>{env?.scenario ?? "none"}</b> · traffic <b>{loadgen?.running ? `${loadgen.rps.toFixed(0)} rps` : "off"}</b>
+              {active ? <> · <span style={{ color: "#c67c1f" }}>incident in progress — wait for it to close before injecting again</span></> : null}
+            </div>
           </div>
         )}
+      </section>
+
+      {/* ── mini demo terminals ─────────────────────────────────────────── */}
+      <section className="card lv-terminals">
+        <div className="body">
+          <div className="lv-termHead">Demo terminals · proof this is not a UI mock</div>
+          <div className="lv-termGrid">
+            {/* Left: live traffic tail */}
+            <div className="lv-term">
+              <div className="lv-termTitle">
+                <span className="lv-termDot lv-termDot--green" />
+                Traffic · one line per second from shop-svc
+              </div>
+              <pre className="lv-termBody">
+                {trafficLog.length === 0
+                  ? <span className="lv-termMuted">waiting for first sample…</span>
+                  : trafficLog.map((l, i) => <div key={i}>{l}</div>)}
+              </pre>
+            </div>
+            {/* Right: curl-and-show */}
+            <div className="lv-term">
+              <div className="lv-termTitle">
+                <span className="lv-termDot lv-termDot--blue" />
+                curl -s http://localhost:9001/shop/health | jq
+                <button
+                  className="lv-termRun"
+                  disabled={curlBusy}
+                  onClick={runCurl}
+                  title="Fires the same curl a judge would run from their laptop. Shows the target service's own view of its state."
+                >{curlBusy ? "⟳" : "▶ Run"}</button>
+              </div>
+              <pre className="lv-termBody">
+                {curlOut === null
+                  ? <span className="lv-termMuted">press Run to hit the endpoint…</span>
+                  : curlOut.err
+                    ? <span className="lv-termErr">{curlOut.err}</span>
+                    : <>
+                        <div className="lv-termMuted">$ curl -s .../shop/health | jq   ({curlOut.ts})</div>
+                        <div>{curlOut.body}</div>
+                      </>}
+              </pre>
+            </div>
+          </div>
+          {/* Bottom: 63-trial harness — spans full width */}
+          <div className="lv-term lv-term--wide">
+            <div className="lv-termTitle">
+              <span className="lv-termDot lv-termDot--amber" />
+              python -m ic.live_trials   ·   63 end-to-end trials across 5 outcome categories
+              <button
+                className="lv-termRun"
+                disabled={trialsBusy}
+                onClick={runTrials}
+                title="Runs the full 63-trial harness offline. Takes about 5 seconds. Prints the outcome table judges can verify."
+              >{trialsBusy ? "⟳ Running…" : "▶ Run 63 trials"}</button>
+            </div>
+            <pre className="lv-termBody lv-termBody--tall">
+              {trialsOut === null
+                ? <span className="lv-termMuted">press Run to execute the harness — output will appear here…</span>
+                : (
+                  <>
+                    <div className="lv-termMuted">$ python -m ic.live_trials   ({trialsOut.ts})</div>
+                    <div>{trialsOut.stdout || <span className="lv-termMuted">(no stdout)</span>}</div>
+                    {trialsOut.err ? <div className="lv-termErr">stderr: {trialsOut.err}</div> : null}
+                    {trialsOut.ok === false && !trialsOut.err ? <div className="lv-termErr">non-zero exit code</div> : null}
+                  </>
+                )}
+            </pre>
+          </div>
+        </div>
       </section>
     </div>
   );
