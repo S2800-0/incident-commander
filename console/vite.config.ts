@@ -12,6 +12,7 @@ export default defineConfig({
       "/investigate": "http://127.0.0.1:8000",
       "/policy": "http://127.0.0.1:8000",
       "/live": "http://127.0.0.1:8000",
+      "/demo": "http://127.0.0.1:8000",
       "/ws": { target: "ws://127.0.0.1:8000", ws: true },
       // Target service mock — see mock/shop_svc.py. Rewrites /api/shop/*
       // → :9000/shop/* so the console can fetch state without CORS.

@@ -403,8 +403,15 @@ def ops_rollback(body: OpContext) -> dict:
         raise HTTPException(409, "no previous version to roll back to")
     before = svc.state()
     target = svc.previous_version
+    rolled_back_from = svc.active_version
     svc.previous_version = svc.active_version
     svc.active_version = target
+    # A real rollback un-provisions the bad version's runtime state: the code
+    # that produced the error rate is no longer running. Clear its error prob
+    # so the mock reflects reality (without this, chaos scenario async tasks
+    # could keep re-triggering errors on the version after we already rolled
+    # off it, which turns a clean rollback into REMEDIATION_FAILED).
+    svc.version_error_prob.pop(rolled_back_from, None)
     svc.deploys.append(Deploy(target, "rollback", time.time(), "incident-commander",
                               f"rollback for {body.incident_id}"))
     entry = svc._log("rollback", f"rolled back {before['active_version']} → {target}",
