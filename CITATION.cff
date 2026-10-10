@@ -1,0 +1,29 @@
+cff-version: 1.2.0
+message: "If you use this software, please cite it as below."
+title: "Incident Commander: an autonomous SRE agent that decides when not to act"
+type: software
+authors:
+  - given-names: Shahesta
+    family-names: Salama
+    affiliation: Alryada University
+  - given-names: Nourseen
+    family-names: Tarek
+    affiliation: Alryada University
+repository-code: "https://github.com/S2800-0/incident-commander"
+license: MIT
+version: 1.0.0
+date-released: 2026-10-10
+keywords:
+  - site reliability engineering
+  - incident response
+  - value of information
+  - Bayesian inference
+  - policy as code
+  - Open Policy Agent
+  - AI agents
+abstract: >-
+  A decision layer for incident response. Competing root-cause hypotheses are
+  updated with Bayesian evidence, checks are chosen by value of information,
+  every state-changing action is gated by an OPA policy engine outside the
+  agent, only reversible actions run, and every decision is sealed in a
+  Merkle tree signed with Ed25519 for offline verification.
