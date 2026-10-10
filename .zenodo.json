@@ -1,0 +1,12 @@
+{
+  "title": "Incident Commander: an autonomous SRE agent that decides when not to act",
+  "upload_type": "software",
+  "description": "A decision layer for incident response. Competing root-cause hypotheses are updated with Bayesian evidence, checks are chosen by value of information, every state-changing action is gated by an OPA policy engine outside the agent, only reversible actions run, and every decision is sealed in a Merkle tree signed with Ed25519 for offline verification.",
+  "creators": [
+    {"name": "Salama, Shahesta", "affiliation": "Alryada University"},
+    {"name": "Tarek, Nourseen", "affiliation": "Alryada University"}
+  ],
+  "license": "MIT",
+  "access_right": "open",
+  "keywords": ["site reliability engineering", "incident response", "value of information", "Bayesian inference", "policy as code", "Open Policy Agent", "AI agents"]
+}

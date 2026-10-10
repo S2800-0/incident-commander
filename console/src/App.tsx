@@ -1031,7 +1031,7 @@ export default function App() {
                     <div className="avatar" style={{ width: 44, height: 44, fontSize: 16 }}>S</div>
                     <div>
                       <div className="userName">Shahesta Mohamed</div>
-                      <div className="userMeta">Independent Researcher · shahesta0028@gmail.com</div>
+                      <div className="userMeta">Alryada University</div>
                     </div>
                   </div>
                   <button className="userAction" onClick={() => { setPanel("about"); }}>About Incident Commander</button>

@@ -6,9 +6,13 @@
 
 Bayesian belief updating for probe selection · OPA policy engine outside the agent · Merkle-signed evidence chain · offline-verifiable postmortems.
 
-[Quickstart](#quickstart) · [What it does](#what-it-does) · [How the mechanism works](#how-the-mechanism-works) · [Architecture](#architecture) · [Roadmap](#roadmap)
+[Quickstart](#quickstart) · [What it does](#what-it-does) · [How it works](#how-the-mechanism-works) · [Architecture](#architecture) · [API](#api) · [Security](#security) · [Deployment](#deployment) · [Roadmap](#roadmap)
 
 </div>
+
+![Incident Commander console: an ambiguous checkout-latency incident resolved by a policy-approved rollback, with hypotheses, probe selection, verification and the sealed evidence chain](demo/screenshots/console_live/01_INC4478_ambiguous_intervention_success.png)
+
+<sub>An ambiguous incident (database overload, or a subtle deploy bug?). The agent runs one discriminating check, OPA allows a bounded rollback, verification confirms recovery, and the decision trail is sealed.</sub>
 
 ---
 
@@ -35,6 +39,10 @@ Enterprise DevOps teams cannot deploy autonomous incident response until three t
 - Every decision produces a receipt a third party can verify without trusting the operator
 
 Incident Commander shows all three end-to-end.
+
+### Status and intended use
+
+A working **research prototype**. It is the basis of our graduation research on decision-theoretic incident response. The intended users are SRE and platform teams, starting in staging and read-only "shadow" mode in production: the agent earns more autonomy one reversible action at a time. It is not yet hardened for production; see [Security](#security).
 
 ## Quickstart
 
@@ -116,6 +124,23 @@ Tamper with any leaf, the same script prints `TAMPERED · exit 1`.
 
 ## Architecture
 
+```mermaid
+flowchart LR
+    T[Target service<br/>shop-svc] -- OpenTelemetry --> D[SLO detector]
+    D --> L[Investigation loop<br/>hypotheses + VoI checks]
+    L -- proposed action --> P{OPA policy<br/>outside the agent}
+    P -- DENY --> E[Escalate to a human]
+    P -- ALLOW --> X[Execute over HTTP]
+    X --> V[Verify with fresh telemetry]
+    V -- not recovered --> R[Auto-revert] --> E
+    L -.-> A[(Merkle + Ed25519<br/>evidence chain)]
+    P -.-> A
+    X -.-> A
+    V -.-> A
+```
+
+<details><summary>Text version</summary>
+
 ```
 Live service (mock shop-svc)
         │  OpenTelemetry
@@ -133,6 +158,8 @@ SLO detector  ──▶  Investigation loop  ──▶  Policy engine (OPA, outs
                           ▼                          ▼
                     Merkle + Ed25519 audit chain (verify.py)
 ```
+
+</details>
 
 Ten engine modules · 15 unit tests · 14 policy tests · 63 end-to-end trials across five outcome patterns.
 
@@ -193,6 +220,70 @@ Results:
 
 Same accuracy at 43% of the probing cost.
 
+## API
+
+The backend (FastAPI, port 8000) serves interactive OpenAPI docs at **http://localhost:8000/docs** once it is running.
+
+| Method | Path | Purpose |
+|---|---|---|
+| `GET` | `/live/state` | Current live-mode state: traffic, active incident, mode |
+| `GET` | `/live/incidents` | Incidents opened by the SLO detector |
+| `GET` | `/live/incidents/{id}/postmortem` | Sealed postmortem for one incident (check it with `verify.py`) |
+| `GET` | `/live/events?since=N` | Live-mode events after sequence number `N` (polling) |
+| `POST` | `/live/mode` | Choose the investigation policy for the next incident (for baseline comparisons) |
+| `POST` | `/investigate` | Run a full investigation on a recorded incident (`{"incident_id": "INC-4478"}`) |
+| `GET` | `/incidents` | Recorded incident corpus |
+| `GET` | `/policy/health` | Is the OPA engine reachable? |
+| `POST` | `/ingest/otlp/v1/metrics`, `/ingest/otlp/v1/logs` | OpenTelemetry (OTLP/HTTP JSON) ingestion |
+| `WS` | `/ws` | Live updates for the console |
+
+The demo target service, `mock/shop_svc.py` (port 9001), exposes the operations the agent may call (`/ops/rollback`, `/ops/canary`, `/ops/inventory-fallback`, `/ops/failover-database`) and the chaos controls (`/chaos/scenario/{name}`, `/chaos/clear`).
+
+## Security
+
+**Safety controls built into the decision path:**
+- **Policy outside the agent.** Every state-changing action is checked by OPA in a separate container. The agent has no code path that skips it, and the backend **fails closed**: if OPA is unreachable, the answer is deny.
+- **Default deny.** The Rego policy allows an action only when its preconditions hold (confidence threshold, cited evidence, recent deploy, bounded traffic and duration), and returns the reason for every denial.
+- **Reversible actions only.** Irreversible actions, such as a database failover, are always denied. Every executed action is verified against fresh telemetry and auto-reverted if recovery does not hold.
+- **Tamper-evident audit.** Each decision is a leaf in a Merkle tree signed with Ed25519; `verify.py` detects any edit offline.
+- **No secrets in the repo.** The signing key is generated locally into `keys/`, which is git-ignored.
+
+**Known limits of this prototype (do not expose it to a network):**
+- The REST and WebSocket APIs have **no authentication**, and CORS allows any origin. They are meant for `localhost` only.
+- The target is a mock service; a real deployment needs least-privilege credentials for the systems it acts on (for Kubernetes, a scoped RBAC service account).
+- Telemetry is trusted as received. Sanitizing logs against injected text (prompt injection through telemetry) is on the roadmap.
+
+To report a security issue, please open a private advisory on this repository rather than a public issue.
+
+## Deployment
+
+**Local (all components):** `./start.command` as in [Quickstart](#quickstart).
+
+**Policy engine only, with Docker Compose:**
+
+```bash
+docker compose up opa        # OPA on :8181, loading ./policy read-only, decision logs on
+```
+
+**Configuration** (environment variables):
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `IC_OPA_URL` | `http://localhost:8181` | OPA endpoint |
+| `IC_OPA_TIMEOUT_S` | `2.0` | Policy call timeout (timeout ⇒ deny) |
+| `IC_POLICY_ENABLED` | set by `start.command` | Gate actions through OPA |
+| `IC_EXECUTE_ROLLBACK` | set by `start.command` | Allow real HTTP execution against the target |
+| `IC_SHOP_SVC_URL` | `http://localhost:9001` | Target service base URL |
+| `IC_USE_LLM` | off | Opt-in LLM triage assist |
+
+**Tests:**
+
+```bash
+pytest                       # unit + integration
+opa test policy/ -v          # Rego policy tests
+python -m ic.live_trials     # 63-trial end-to-end harness
+```
+
 ## Stack
 
 - **Python 3.11+ · FastAPI · uvicorn · httpx** — backend and target service
@@ -235,6 +326,10 @@ No LLM in the decision path. LLM support exists as an opt-in triage assist behin
 ## Contributing
 
 Issues and pull requests welcome. The project follows conventional commits and standard pytest discipline. Run `pytest` before opening a PR.
+
+## Citation
+
+If you use this work, please cite it (GitHub's **"Cite this repository"** button reads [`CITATION.cff`](CITATION.cff)).
 
 ## License
 
