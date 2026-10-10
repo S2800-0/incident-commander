@@ -4,6 +4,8 @@
 
 **An autonomous SRE agent that decides when *not* to act.**
 
+[![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.23276215.svg)](https://doi.org/10.5281/zenodo.23276215)
+
 Bayesian belief updating for probe selection · OPA policy engine outside the agent · Merkle-signed evidence chain · offline-verifiable postmortems.
 
 [Quickstart](#quickstart) · [What it does](#what-it-does) · [How it works](#how-the-mechanism-works) · [Architecture](#architecture) · [API](#api) · [Security](#security) · [Deployment](#deployment) · [Roadmap](#roadmap)
